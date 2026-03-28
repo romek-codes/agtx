@@ -214,6 +214,7 @@ struct AppState {
     config: MergedConfig,
     project_path: Option<PathBuf>,
     project_name: String,
+    tmux_project_name: String,
     available_agents: Vec<agent::Agent>,
     // Tmux operations (injectable for testing)
     tmux_ops: Arc<dyn TmuxOperations>,
@@ -517,11 +518,12 @@ impl App {
         let available_agents = agent::detect_available_agents();
 
         // Setup based on mode
-        let (db, project_path, project_name, project_config) = match &mode {
+        let (db, project_path, project_name, tmux_project_name, project_config) = match &mode {
             AppMode::Dashboard => (
                 None,
                 None,
                 "Dashboard".to_string(),
+                tmux_safe_project_name("Dashboard"),
                 ProjectConfig::default(),
             ),
             AppMode::Project(path) => {
@@ -531,6 +533,7 @@ impl App {
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .to_string();
+                let tmux_name = tmux_safe_project_name(&name);
                 let project_config = ProjectConfig::load(&canonical).unwrap_or_default();
                 let db = Database::open_project(&canonical)?;
 
@@ -539,9 +542,9 @@ impl App {
                 global_db.upsert_project(&project)?;
 
                 // Ensure tmux session exists for this project
-                ensure_project_tmux_session(&name, &canonical, tmux_ops.as_ref());
+                ensure_project_tmux_session(&tmux_name, &canonical, tmux_ops.as_ref());
 
-                (Some(db), Some(canonical), name, project_config)
+                (Some(db), Some(canonical), name, tmux_name, project_config)
             }
         };
 
@@ -567,6 +570,7 @@ impl App {
                 config,
                 project_path,
                 project_name: project_name.clone(),
+                tmux_project_name: tmux_project_name.clone(),
                 available_agents,
                 tmux_ops,
                 git_ops,
@@ -626,7 +630,7 @@ impl App {
 
         // Detect existing orchestrator session (survives agtx restarts)
         if app.state.flags.experimental {
-            let orch_target = format!("{}:orchestrator", app.state.project_name);
+            let orch_target = format!("{}:orchestrator", app.state.tmux_project_name);
             if app
                 .state
                 .tmux_ops
@@ -697,16 +701,26 @@ impl App {
         let terminal = ratatui::Terminal::new(AppBackend::Test(backend))?;
 
         let global_db = Database::open_in_memory_global()?;
-        let (db, mode, project_name) = if let Some(ref path) = project_path {
+        let (db, mode, project_name, tmux_project_name) = if let Some(ref path) = project_path {
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("test-project")
                 .to_string();
             let db = Database::open_in_memory_project()?;
-            (Some(db), AppMode::Project(path.clone()), name)
+            (
+                Some(db),
+                AppMode::Project(path.clone()),
+                name.clone(),
+                tmux_safe_project_name(&name),
+            )
         } else {
-            (None, AppMode::Dashboard, "Dashboard".to_string())
+            (
+                None,
+                AppMode::Dashboard,
+                "Dashboard".to_string(),
+                tmux_safe_project_name("Dashboard"),
+            )
         };
 
         let config = MergedConfig::merge(&GlobalConfig::default(), &ProjectConfig::default());
@@ -731,6 +745,7 @@ impl App {
                 config,
                 project_path,
                 project_name,
+                tmux_project_name,
                 available_agents: vec![],
                 tmux_ops,
                 git_ops,
@@ -4247,6 +4262,7 @@ impl App {
         let prompt_trigger = resolve_prompt_trigger(&plugin, "planning");
         let all_agents = collect_phase_agents(&self.state.config);
         let project_name = self.state.project_name.clone();
+        let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
@@ -4296,7 +4312,7 @@ impl App {
             let result = setup_task_worktree(
                 &mut tmp_task,
                 &project_path,
-                &project_name,
+                &tmux_project_name,
                 &prompt,
                 &base_branch,
                 copy_files,
@@ -4580,6 +4596,7 @@ impl App {
 
         let all_agents = collect_phase_agents(&self.state.config);
         let project_name = self.state.project_name.clone();
+        let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
@@ -4609,7 +4626,7 @@ impl App {
             let result = setup_task_worktree(
                 &mut tmp_task,
                 &project_path,
-                &project_name,
+                &tmux_project_name,
                 "",
                 &base_branch,
                 copy_files,
@@ -4777,6 +4794,7 @@ impl App {
         );
         let prompt_trigger = resolve_prompt_trigger(&plugin, "running");
         let project_name = self.state.project_name.clone();
+        let tmux_project_name = self.state.tmux_project_name.clone();
         let base_branch = self.state.config.base_branch.clone();
         let copy_files = self.state.config.copy_files.clone();
         let init_script = self.state.config.init_script.clone();
@@ -4801,7 +4819,7 @@ impl App {
             let result = setup_task_worktree(
                 &mut tmp_task,
                 &project_path,
-                &project_name,
+                &tmux_project_name,
                 &prompt,
                 &base_branch,
                 copy_files,
@@ -5247,9 +5265,9 @@ impl App {
             }
         };
 
-        let project_name = self.state.project_name.clone();
+        let tmux_project_name = self.state.tmux_project_name.clone();
         let window_name = "orchestrator";
-        let orch_target = format!("{}:{}", project_name, window_name);
+        let orch_target = format!("{}:{}", tmux_project_name, window_name);
 
         // If orchestrator is running, open the popup to view it
         if let Some(ref orch_target) = self.state.orchestrator_session {
@@ -5305,11 +5323,15 @@ impl App {
         let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &agtx_bin);
 
         // Ensure project tmux session exists
-        ensure_project_tmux_session(&project_name, &project_path, self.state.tmux_ops.as_ref());
+        ensure_project_tmux_session(
+            &tmux_project_name,
+            &project_path,
+            self.state.tmux_ops.as_ref(),
+        );
 
         // Create orchestrator tmux window in the project root (no worktree)
         self.state.tmux_ops.create_window(
-            &project_name,
+            &tmux_project_name,
             window_name,
             &project_path_str,
             Some(agent_cmd),
@@ -5377,7 +5399,7 @@ impl App {
                         (term_height as u32 * SHELL_POPUP_HEIGHT_PERCENT as u32 / 100) as u16;
                     let pane_height = popup_height.saturating_sub(4); // -4 for borders + header/footer
 
-                    let target = format!("{}:{}", self.state.project_name, window_name);
+                    let target = format!("{}:{}", self.state.tmux_project_name, window_name);
                     // TODO the resize should be done on target which is
                     // session_name:window_name, but for some reason that doesn't work
                     // doing tmux -L agtx resize-window -t session:window -x 30 -y 30 works
@@ -5907,6 +5929,7 @@ impl App {
 
         // Update current project
         self.state.project_name = project.name.clone();
+        self.state.tmux_project_name = tmux_safe_project_name(&project.name);
         self.state.project_path = Some(project_path.clone());
 
         // Open project database (create if needed)
@@ -5923,7 +5946,11 @@ impl App {
         let _ = self.state.global_db.upsert_project(&proj);
 
         // Ensure tmux session exists
-        ensure_project_tmux_session(&project.name, &project_path, self.state.tmux_ops.as_ref());
+        ensure_project_tmux_session(
+            &self.state.tmux_project_name,
+            &project_path,
+            self.state.tmux_ops.as_ref(),
+        );
 
         // Clear per-task caches from previous project
         self.state.merge_conflict_checked.clear();
@@ -6033,6 +6060,26 @@ fn copy_back_to_project(worktree: &Path, project_root: &Path, entries: &[String]
             }
             let _ = std::fs::copy(&src, &dst);
         }
+    }
+}
+
+fn tmux_safe_project_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            slug.push(c);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "project".to_string()
+    } else {
+        slug
     }
 }
 
@@ -6152,7 +6199,7 @@ fn cleanup_task_resources(
 fn setup_task_worktree(
     task: &mut Task,
     project_path: &Path,
-    project_name: &str,
+    tmux_project_name: &str,
     prompt: &str,
     base_branch: &str,
     copy_files: Option<String>,
@@ -6167,7 +6214,7 @@ fn setup_task_worktree(
 ) -> Result<String> {
     let unique_slug = generate_task_slug(&task.id, &task.title);
     let window_name = format!("task-{}", unique_slug);
-    let target = format!("{}:{}", project_name, window_name);
+    let target = format!("{}:{}", tmux_project_name, window_name);
 
     // Create git worktree from the configured base branch
     let worktree_path_str = match git_ops.create_worktree(project_path, &unique_slug, base_branch) {
@@ -6298,10 +6345,10 @@ fn setup_task_worktree(
     };
 
     // Ensure project tmux session exists
-    ensure_project_tmux_session(project_name, project_path, tmux_ops);
+    ensure_project_tmux_session(tmux_project_name, project_path, tmux_ops);
 
     tmux_ops.create_window(
-        project_name,
+        tmux_project_name,
         &window_name,
         &worktree_path_str,
         Some(agent_cmd),

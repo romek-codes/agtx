@@ -85,6 +85,15 @@ fn test_task_generate_session_name_special_chars() {
 }
 
 #[test]
+fn test_task_generate_session_name_project_dots() {
+    let task = Task::new("Task Title", "claude", "proj");
+    let session_name = task.generate_session_name("lazygit.nvim");
+
+    assert!(session_name.contains("--lazygit-nvim--"));
+    assert!(!session_name.contains(".nvim"));
+}
+
+#[test]
 fn test_task_unique_ids() {
     let task1 = Task::new("Task 1", "claude", "proj");
     let task2 = Task::new("Task 2", "claude", "proj");

@@ -881,6 +881,17 @@ fn test_generate_task_slug_empty_title() {
 }
 
 // =============================================================================
+// Tests for tmux_safe_project_name
+// =============================================================================
+
+#[test]
+fn test_tmux_safe_project_name_replaces_dots() {
+    let name = tmux_safe_project_name("lazygit.nvim");
+    assert_eq!(name, "lazygit-nvim");
+    assert!(!name.contains('.'));
+}
+
+// =============================================================================
 // Tests for cleanup_task_for_done
 // =============================================================================
 
