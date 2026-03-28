@@ -41,20 +41,26 @@ fn build_footer_text(
     sidebar_focused: bool,
     selected_column: usize,
     has_cyclic_plugin: bool,
+    show_recreate_session: bool,
 ) -> String {
     match input_mode {
         InputMode::Normal => {
             if sidebar_focused {
-                " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit ".to_string()
+                " [j/k] navigate  [Enter] open  [l] board  [e] hide sidebar  [q] quit "
+                    .to_string()
             } else {
-                match selected_column {
+                let mut text = match selected_column {
                     0 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [R] research  [m] plan  [M] run  [e] sidebar  [q] quit".to_string(),
                     1 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] run  [e] sidebar  [q] quit".to_string(),
                     2 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
                     3 if has_cyclic_plugin => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] done  [r] resume  [p] next phase  [e] sidebar  [q] quit".to_string(),
                     3 => " [o] new  [/] search  [Enter] open  [x] del  [d] diff  [m] move  [r] move left  [e] sidebar  [q] quit".to_string(),
                     _ => " [o] new  [/] search  [Enter] open  [x] del  [e] sidebar  [q] quit".to_string(),
+                };
+                if show_recreate_session {
+                    text.push_str("  [s] recreate");
                 }
+                text
             }
         }
         InputMode::InputTitle => " Enter task title... [Esc] cancel [Enter] next ".to_string(),
@@ -271,6 +277,8 @@ struct AppState {
     spinner_frame: usize,
     // Idle detection: (content_hash, last_change_time) per task
     pane_content_hashes: HashMap<String, (u64, Instant)>,
+    // Cache of tmux session existence per task (bool, last_updated)
+    session_exists_cache: HashMap<String, (bool, Instant)>,
     // Guard: task IDs for which merge-conflict check has already been performed
     merge_conflict_checked: HashSet<String>,
     // Guard: task IDs for which stuck-task notification has been fired (reset on phase advance)
@@ -352,6 +360,8 @@ struct SessionTaskStatus {
     worktree_path: Option<String>,
     /// Tmux session name (needed for merge-conflict check).
     session_name: Option<String>,
+    /// Whether the tmux session/window exists.
+    session_exists: bool,
     /// Agent name (needed for merge-conflict skill dispatch).
     agent: String,
     /// Whether this task was already Ready before this refresh cycle.
@@ -598,6 +608,7 @@ impl App {
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
+                session_exists_cache: HashMap::new(),
                 merge_conflict_checked: HashSet::new(),
                 stuck_task_notified: HashSet::new(),
                 stuck_task_idle_since: HashMap::new(),
@@ -762,6 +773,7 @@ impl App {
                 phase_status_cache: HashMap::new(),
                 spinner_frame: 0,
                 pane_content_hashes: HashMap::new(),
+                session_exists_cache: HashMap::new(),
                 merge_conflict_checked: HashSet::new(),
                 stuck_task_notified: HashSet::new(),
                 stuck_task_idle_since: HashMap::new(),
@@ -1136,6 +1148,19 @@ impl App {
             .and_then(|t| t.plugin.as_ref())
             .and_then(|name| WorkflowPlugin::load(name, state.project_path.as_deref()).ok())
             .map_or(false, |p| p.cyclic);
+        let show_recreate_session = state
+            .board
+            .selected_task()
+            .and_then(|task| {
+                if task.session_name.is_none() {
+                    return None;
+                }
+                state.session_exists_cache.get(&task.id).map(|(exists, ts)| {
+                    let stale = ts.elapsed() > std::time::Duration::from_secs(10);
+                    !stale && !*exists
+                })
+            })
+            .unwrap_or(false);
         let (footer_text, footer_style) = if let Some((ref msg, created)) = state.warning_message {
             if created.elapsed() < std::time::Duration::from_secs(5) {
                 (msg.clone(), Style::default().fg(Color::Yellow))
@@ -1146,6 +1171,7 @@ impl App {
                         state.sidebar_focused,
                         state.board.selected_column,
                         has_cyclic_plugin,
+                        show_recreate_session,
                     ),
                     Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
                 )
@@ -1157,6 +1183,7 @@ impl App {
                     state.sidebar_focused,
                     state.board.selected_column,
                     has_cyclic_plugin,
+                    show_recreate_session,
                 ),
                 Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
             )
@@ -3224,6 +3251,7 @@ impl App {
             }
             KeyCode::Char('x') => self.delete_selected_task()?,
             KeyCode::Char('d') => self.show_task_diff()?,
+            KeyCode::Char('s') => self.recreate_selected_task_session()?,
             KeyCode::Char('m') => self.move_task_right()?,
             KeyCode::Char('M') => self.move_backlog_to_running()?,
             KeyCode::Char('R') => {
@@ -5364,6 +5392,18 @@ impl App {
     fn open_selected_task(&mut self) -> Result<()> {
         if let Some(task) = self.state.board.selected_task() {
             if let Some(window_name) = &task.session_name.clone() {
+                if !self
+                    .state
+                    .tmux_ops
+                    .window_exists(window_name)
+                    .unwrap_or(false)
+                {
+                    self.state.warning_message = Some((
+                        "tmux session missing — press [s] to recreate".to_string(),
+                        Instant::now(),
+                    ));
+                    return Ok(());
+                }
                 let task_id = task.id.clone();
                 let escalation_note = task.escalation_note.clone();
                 let mut popup = ShellPopup::new(task.title.clone(), window_name.clone());
@@ -5397,6 +5437,146 @@ impl App {
                 self.state.shell_popup = Some(popup);
             }
         }
+        Ok(())
+    }
+
+    fn recreate_selected_task_session(&mut self) -> Result<()> {
+        let Some(task) = self.state.board.selected_task().cloned() else {
+            return Ok(());
+        };
+        let Some(session_name) = task.session_name.clone() else {
+            self.state.warning_message = Some((
+                "task has no tmux session to recreate".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        };
+        let Some(worktree_path) = task.worktree_path.clone() else {
+            self.state.warning_message = Some((
+                "task has no worktree to recreate a session".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        };
+        if !Path::new(&worktree_path).exists() {
+            self.state.warning_message = Some((
+                "worktree missing — cannot recreate session".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        }
+        if self
+            .state
+            .tmux_ops
+            .window_exists(&session_name)
+            .unwrap_or(false)
+        {
+            self.state.warning_message = Some((
+                "tmux session already running".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        }
+        let Some(project_path) = self.state.project_path.clone() else {
+            self.state.warning_message = Some((
+                "no project loaded — cannot recreate session".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        };
+
+        let (project_session, window_name) =
+            match session_name.split_once(':') {
+                Some((session, window)) => (session.to_string(), window.to_string()),
+                None => (self.state.project_name.clone(), session_name.clone()),
+            };
+
+        ensure_project_tmux_session(&project_session, &project_path, self.state.tmux_ops.as_ref());
+
+        let agent_ops = self.state.agent_registry.get(&task.agent);
+        let agent_cmd = agent_ops.build_interactive_command("");
+
+        let use_restore_cmd = self
+            .load_task_plugin(&task)
+            .as_ref()
+            .map_or(false, |p| p.name == "agtx");
+        if use_restore_cmd {
+            deploy_skill(
+                Path::new(&worktree_path),
+                "agtx-restore",
+                skills::RESTORE_SKILL,
+                &task.agent,
+            );
+        }
+
+        self.state.tmux_ops.create_window(
+            &project_session,
+            &window_name,
+            &worktree_path,
+            Some(agent_cmd),
+        )?;
+
+        let plugin = self.load_task_plugin(&task);
+        let task_content = task.content_text();
+        let phase = match task.status {
+            TaskStatus::Backlog => "research",
+            TaskStatus::Planning => determine_phase_variant(
+                "planning",
+                task.worktree_path.as_deref(),
+                &task.id,
+                &plugin,
+                task.cycle,
+            ),
+            TaskStatus::Running => determine_phase_variant(
+                "running",
+                task.worktree_path.as_deref(),
+                &task.id,
+                &plugin,
+                task.cycle,
+            ),
+            TaskStatus::Review => "review",
+            TaskStatus::Done => "review",
+        };
+        let mut prompt = resolve_prompt(&plugin, phase, &task_content, &task.id, task.cycle);
+        let prompt_trigger = resolve_prompt_trigger(&plugin, phase);
+        let auto_dismiss = plugin
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
+        let skill_cmd = if use_restore_cmd {
+            skills::transform_plugin_command("/agtx:restore", &task.agent)
+        } else {
+            resolve_skill_command(&plugin, phase, &task.agent, &task_content, task.cycle)
+        };
+        if use_restore_cmd && prompt.is_empty() {
+            prompt = task_content.clone();
+        }
+
+        let target = format!("{}:{}", project_session, window_name);
+        let tmux_ops = Arc::clone(&self.state.tmux_ops);
+        let agent_name = task.agent.clone();
+        std::thread::spawn(move || {
+            if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target) {
+                send_skill_and_prompt(
+                    &tmux_ops,
+                    &ready_target,
+                    &skill_cmd,
+                    &prompt,
+                    &prompt_trigger,
+                    &task_content,
+                    &agent_name,
+                    &auto_dismiss,
+                );
+            }
+        });
+
+        self.state.session_exists_cache.insert(
+            task.id.clone(),
+            (true, Instant::now()),
+        );
+        self.state.warning_message = Some((
+            "tmux session recreated — restoring context".to_string(),
+            Instant::now(),
+        ));
         Ok(())
     }
 
@@ -5659,6 +5839,11 @@ impl App {
                     PhaseStatus::Working
                 };
 
+                let session_exists = session_name
+                    .as_ref()
+                    .map(|sn| tmux_ops.window_exists(sn).unwrap_or(false))
+                    .unwrap_or(false);
+
                 // Copy-back on Working → Ready transition
                 if phase_status == PhaseStatus::Ready && !was_ready {
                     if let (Some(ref wt), Some(ref pp)) = (&worktree_path, &project_path) {
@@ -5696,6 +5881,7 @@ impl App {
                     status,
                     worktree_path,
                     session_name,
+                    session_exists,
                     agent,
                     was_ready,
                 });
@@ -5711,6 +5897,9 @@ impl App {
 
         for task_status in result.statuses {
             let mut phase = task_status.phase_status;
+            self.state
+                .session_exists_cache
+                .insert(task_status.task_id.clone(), (task_status.session_exists, now));
 
             if phase == PhaseStatus::Working {
                 // Idle detection: check if content hash has been stable for 15s
