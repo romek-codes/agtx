@@ -523,7 +523,7 @@ impl App {
                 None,
                 None,
                 "Dashboard".to_string(),
-                tmux_safe_project_name("Dashboard"),
+                tmux::safe_session_name("Dashboard"),
                 ProjectConfig::default(),
             ),
             AppMode::Project(path) => {
@@ -533,7 +533,7 @@ impl App {
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let tmux_name = tmux_safe_project_name(&name);
+                let tmux_name = tmux::safe_session_name(&name);
                 let project_config = ProjectConfig::load(&canonical).unwrap_or_default();
                 let db = Database::open_project(&canonical)?;
 
@@ -712,14 +712,14 @@ impl App {
                 Some(db),
                 AppMode::Project(path.clone()),
                 name.clone(),
-                tmux_safe_project_name(&name),
+                tmux::safe_session_name(&name),
             )
         } else {
             (
                 None,
                 AppMode::Dashboard,
                 "Dashboard".to_string(),
-                tmux_safe_project_name("Dashboard"),
+                tmux::safe_session_name("Dashboard"),
             )
         };
 
@@ -5929,7 +5929,7 @@ impl App {
 
         // Update current project
         self.state.project_name = project.name.clone();
-        self.state.tmux_project_name = tmux_safe_project_name(&project.name);
+        self.state.tmux_project_name = tmux::safe_session_name(&project.name);
         self.state.project_path = Some(project_path.clone());
 
         // Open project database (create if needed)
@@ -6063,25 +6063,6 @@ fn copy_back_to_project(worktree: &Path, project_root: &Path, entries: &[String]
     }
 }
 
-fn tmux_safe_project_name(name: &str) -> String {
-    let mut slug = String::new();
-    let mut last_was_dash = false;
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-            slug.push(c);
-            last_was_dash = false;
-        } else if !last_was_dash {
-            slug.push('-');
-            last_was_dash = true;
-        }
-    }
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "project".to_string()
-    } else {
-        slug
-    }
-}
 
 /// Generate a URL-safe slug from task ID and title
 fn generate_task_slug(task_id: &str, title: &str) -> String {

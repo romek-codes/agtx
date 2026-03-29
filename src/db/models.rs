@@ -1,3 +1,4 @@
+use crate::tmux::safe_session_name;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -115,7 +116,7 @@ impl Task {
 
     /// Generate tmux session name: task-{id}--{project}--{slug}
     pub fn generate_session_name(&self, project_name: &str) -> String {
-        let project_name = tmux_safe_project_name(project_name);
+        let project_name = safe_session_name(project_name);
         let slug = self
             .title
             .to_lowercase()
@@ -126,26 +127,6 @@ impl Task {
         // Truncate slug to keep session name reasonable
         let slug: String = slug.chars().take(20).collect();
         format!("task-{}--{}--{}", &self.id[..8], project_name, slug)
-    }
-}
-
-fn tmux_safe_project_name(name: &str) -> String {
-    let mut slug = String::new();
-    let mut last_was_dash = false;
-    for c in name.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-            slug.push(c);
-            last_was_dash = false;
-        } else if !last_was_dash {
-            slug.push('-');
-            last_was_dash = true;
-        }
-    }
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "project".to_string()
-    } else {
-        slug
     }
 }
 
