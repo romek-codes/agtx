@@ -30,12 +30,17 @@ impl ShellPopup {
         }
     }
 
-    /// Scroll up into history
+    /// Scroll up into history, clamped to content bounds.
     pub fn scroll_up(&mut self, lines: i32) {
-        self.scroll_offset -= lines;
+        // Derive the total line count from text lines rather than raw '\n' bytes,
+        // so that a final line without a trailing newline is still counted.
+        let content_str = String::from_utf8_lossy(&self.cached_content);
+        let total_lines = content_str.lines().count() as i32;
+        let min_offset = -(total_lines.max(0));
+        self.scroll_offset = (self.scroll_offset - lines).max(min_offset);
     }
 
-    /// Scroll down toward current content
+    /// Scroll down toward current content, clamped to 0.
     pub fn scroll_down(&mut self, lines: i32) {
         self.scroll_offset = (self.scroll_offset + lines).min(0);
     }
