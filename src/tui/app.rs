@@ -5,9 +5,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{prelude::*, widgets::*};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -42,6 +44,8 @@ fn build_footer_text(
     selected_column: usize,
     has_cyclic_plugin: bool,
     show_recreate_session: bool,
+    show_open_app: bool,
+    show_logs: bool,
 ) -> String {
     match input_mode {
         InputMode::Normal => {
@@ -60,6 +64,12 @@ fn build_footer_text(
                 if show_recreate_session {
                     text.push_str("  [s] recreate");
                 }
+                if show_open_app {
+                    text.push_str("  [b] app");
+                }
+                if show_logs {
+                    text.push_str("  [L] log");
+                }
                 text
             }
         }
@@ -71,6 +81,154 @@ fn build_footer_text(
             " [#] files  [/] skills  [!] tasks  [Esc] cancel  [\\+Enter] newline  [Enter] save "
                 .to_string()
         }
+    }
+}
+
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 3 {
+        return text.chars().take(max_width).collect();
+    }
+    let truncated: String = text.chars().take(max_width.saturating_sub(3)).collect();
+    format!("{}...", truncated)
+}
+
+fn task_meta_path(worktree_path: &str) -> PathBuf {
+    Path::new(worktree_path).join(".agtx").join("meta.json")
+}
+
+fn extract_port(value: &Value, keys: &[&str]) -> Option<u16> {
+    for key in keys {
+        if let Some(port_value) = value.get(*key) {
+            if let Some(port) = port_value.as_u64() {
+                if port <= u16::MAX as u64 {
+                    return Some(port as u16);
+                }
+            } else if let Some(port_str) = port_value.as_str() {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return Some(port);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_string(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(val) = value.get(*key) {
+            if let Some(s) = val.as_str() {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_task_meta(contents: &str) -> Option<TaskMeta> {
+    let value: Value = serde_json::from_str(contents).ok()?;
+    let port = extract_port(&value, &["port", "app_port"]);
+    let url = extract_string(&value, &["url", "app_url"]);
+    if port.is_none() && url.is_none() {
+        return None;
+    }
+    Some(TaskMeta { port, url })
+}
+
+fn read_task_meta(worktree_path: &str) -> Option<TaskMeta> {
+    let meta_path = task_meta_path(worktree_path);
+    let contents = std::fs::read_to_string(meta_path).ok()?;
+    parse_task_meta(&contents)
+}
+
+fn task_meta_label(task: &Task) -> Option<String> {
+    let worktree_path = task.worktree_path.as_deref()?;
+    let meta = read_task_meta(worktree_path)?;
+    if let Some(port) = meta.port {
+        return Some(format!("port {}", port));
+    }
+    meta.url.map(|url| format!("url {}", url))
+}
+
+fn task_footer_label(task: &Task) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(meta) = task_meta_label(task) {
+        parts.push(meta);
+    }
+    if task.log_scripts && task_has_logs(task) {
+        parts.push("log".to_string());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn task_has_logs(task: &Task) -> bool {
+    let Some(worktree_path) = task.worktree_path.as_deref() else {
+        return false;
+    };
+    let log_dir = Path::new(worktree_path).join(".agtx").join("logs");
+    log_dir.join("init.log").exists() || log_dir.join("cleanup.log").exists()
+}
+
+fn task_app_url(task: &Task) -> Option<String> {
+    let worktree_path = task.worktree_path.as_deref()?;
+    let meta = read_task_meta(worktree_path)?;
+    if let Some(url) = meta.url {
+        return Some(url);
+    }
+    meta.port.map(|port| format!("http://localhost:{}", port))
+}
+
+fn normalize_url(url: &str) -> String {
+    if url.contains("://") {
+        url.to_string()
+    } else {
+        format!("http://{}", url)
+    }
+}
+
+fn open_url_in_browser(url: &str) -> Result<()> {
+#[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        anyhow::bail!("Unsupported platform for opening URLs");
     }
 }
 
@@ -255,6 +413,8 @@ struct AppState {
     review_to_running_task_id: Option<String>,
     // Git diff popup
     diff_popup: Option<DiffPopup>,
+    // Script log popup
+    log_popup: Option<LogPopup>,
     // Channel for receiving PR description generation results
     pr_generation_rx: Option<mpsc::Receiver<(String, String)>>,
     // PR creation status popup
@@ -374,6 +534,12 @@ struct SessionRefreshResult {
     statuses: Vec<SessionTaskStatus>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct TaskMeta {
+    port: Option<u16>,
+    url: Option<String>,
+}
+
 /// State for PR creation status popup (loading/success/error)
 #[derive(Debug, Clone)]
 struct PrStatusPopup {
@@ -395,6 +561,14 @@ enum PrCreationStatus {
 struct DiffPopup {
     task_title: String,
     diff_content: String,
+    scroll_offset: usize,
+}
+
+/// State for script log popup
+#[derive(Debug, Clone)]
+struct LogPopup {
+    task_title: String,
+    log_content: String,
     scroll_offset: usize,
 }
 
@@ -600,6 +774,7 @@ impl App {
                 pr_confirm_popup: None,
                 review_to_running_task_id: None,
                 diff_popup: None,
+                log_popup: None,
                 pr_generation_rx: None,
                 pr_status_popup: None,
                 pr_creation_rx: None,
@@ -776,6 +951,7 @@ impl App {
                 pr_confirm_popup: None,
                 review_to_running_task_id: None,
                 diff_popup: None,
+                log_popup: None,
                 pr_generation_rx: None,
                 pr_status_popup: None,
                 pr_creation_rx: None,
@@ -850,6 +1026,7 @@ impl App {
                 if let Ok(result) = rx.try_recv() {
                     self.state.setup_rx = None;
                     if let Some(err) = result.error {
+                        self.state.phase_status_cache.remove(&result.task_id);
                         self.state.warning_message = Some((err, Instant::now()));
                     } else {
                         // Update task with worktree info from background setup
@@ -867,6 +1044,10 @@ impl App {
                                 let _ = db.update_task(&task);
                             }
                         }
+                        self.state.phase_status_cache.insert(
+                            result.task_id.clone(),
+                            (PhaseStatus::Working, Instant::now()),
+                        );
                         self.refresh_tasks()?;
                     }
                 }
@@ -1110,6 +1291,7 @@ impl App {
                     break;
                 }
 
+                let meta_label = task_footer_label(task);
                 Self::draw_task_card(
                     frame,
                     task,
@@ -1117,6 +1299,7 @@ impl App {
                     is_selected,
                     &state.config.theme,
                     state.phase_status_cache.get(&task.id),
+                    meta_label.as_deref(),
                     state.spinner_frame,
                 );
             }
@@ -1176,6 +1359,16 @@ impl App {
                 })
             })
             .unwrap_or(false);
+        let show_open_app = state
+            .board
+            .selected_task()
+            .map(|task| task_app_url(task).is_some())
+            .unwrap_or(false);
+        let show_logs = state
+            .board
+            .selected_task()
+            .map(task_has_logs)
+            .unwrap_or(false);
         let (footer_text, footer_style) = if let Some((ref msg, created)) = state.warning_message {
             if created.elapsed() < std::time::Duration::from_secs(5) {
                 (msg.clone(), Style::default().fg(Color::Yellow))
@@ -1187,6 +1380,8 @@ impl App {
                         state.board.selected_column,
                         has_cyclic_plugin,
                         show_recreate_session,
+                        show_open_app,
+                        show_logs,
                     ),
                     Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
                 )
@@ -1199,6 +1394,8 @@ impl App {
                     state.board.selected_column,
                     has_cyclic_plugin,
                     show_recreate_session,
+                    show_open_app,
+                    show_logs,
                 ),
                 Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
             )
@@ -2058,6 +2255,57 @@ impl App {
             );
             frame.render_widget(footer, popup_chunks[2]);
         }
+
+        // Script log popup
+        if let Some(ref popup) = state.log_popup {
+            let popup_area = centered_rect(80, 80, area);
+            frame.render_widget(Clear, popup_area);
+
+            let popup_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Title bar
+                    Constraint::Min(0),    // Log content
+                    Constraint::Length(1), // Footer
+                ])
+                .split(popup_area);
+
+            // Title bar
+            let title = format!(" Logs: {} ", popup.task_title);
+            let title_bar = Paragraph::new(title).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(hex_to_color(&state.config.theme.color_popup_header)),
+            );
+            frame.render_widget(title_bar, popup_chunks[0]);
+
+            let lines: Vec<Line> = popup
+                .log_content
+                .lines()
+                .skip(popup.scroll_offset)
+                .take(popup_chunks[1].height.saturating_sub(2) as usize)
+                .map(|line| Line::from(Span::styled(line, Style::default().fg(Color::White))))
+                .collect();
+
+            let log_content =
+                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).border_style(
+                    Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)),
+                ));
+            frame.render_widget(log_content, popup_chunks[1]);
+
+            let total_lines = popup.log_content.lines().count();
+            let footer_text = format!(
+                " [j/k] scroll  [d/u] page  [g/G] top/bottom  [q/Esc] close  ({}/{}) ",
+                popup.scroll_offset + 1,
+                total_lines
+            );
+            let footer = Paragraph::new(footer_text).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(hex_to_color(&state.config.theme.color_dimmed)),
+            );
+            frame.render_widget(footer, popup_chunks[2]);
+        }
     }
 
     fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
@@ -2088,6 +2336,7 @@ impl App {
         is_selected: bool,
         theme: &ThemeConfig,
         phase_status: Option<&(PhaseStatus, Instant)>,
+        meta_label: Option<&str>,
         spinner_frame: usize,
     ) {
         let border_style = if is_selected {
@@ -2135,7 +2384,8 @@ impl App {
             task.status,
             TaskStatus::Planning | TaskStatus::Running | TaskStatus::Review
         ) || (task.status == TaskStatus::Backlog
-            && task.session_name.is_some());
+            && task.session_name.is_some())
+            || matches!(phase_status, Some((PhaseStatus::Working, _)));
 
         if show_indicator {
             const SPINNER_FRAMES: &[&str] = &[
@@ -2193,7 +2443,8 @@ impl App {
 
         // Footer line with agent name (for active tasks)
         let show_agent = task.status != TaskStatus::Backlog || task.session_name.is_some();
-        let footer_height = if show_agent && inner.height > 2 {
+        let show_meta = meta_label.map(|label| !label.trim().is_empty()).unwrap_or(false);
+        let footer_height = if (show_agent || show_meta) && inner.height > 2 {
             1u16
         } else {
             0u16
@@ -2235,7 +2486,7 @@ impl App {
             frame.render_widget(preview, preview_area);
         }
 
-        // Agent footer
+        // Footer (agent + optional meta label)
         if footer_height > 0 {
             let footer_area = Rect {
                 x: inner.x,
@@ -2243,6 +2494,8 @@ impl App {
                 width: inner.width,
                 height: 1,
             };
+            let agent_label = format!(" {} ", task.agent);
+            let agent_label_width = agent_label.chars().count() as u16;
             let agent_style = match task.agent.as_str() {
                 "claude" => Style::default().fg(Color::Rgb(227, 148, 62)), // orange
                 "gemini" => Style::default().fg(Color::Rgb(234, 130, 180)), // pink
@@ -2250,10 +2503,52 @@ impl App {
                 "codex" => Style::default().fg(Color::White).bg(Color::Rgb(20, 20, 20)), // white on black
                 _ => Style::default().fg(Color::White),
             };
-            let agent_label = Paragraph::new(format!(" {} ", task.agent))
-                .style(agent_style)
-                .alignment(Alignment::Right);
-            frame.render_widget(agent_label, footer_area);
+
+            let meta_text = meta_label.unwrap_or("").trim();
+            if show_agent && show_meta {
+                let right_width = agent_label_width.min(footer_area.width);
+                let left_width = footer_area.width.saturating_sub(right_width);
+                if left_width > 0 {
+                    let truncated = truncate_to_width(meta_text, left_width as usize);
+                    let meta = Paragraph::new(truncated)
+                        .style(Style::default().fg(hex_to_color(&theme.color_dimmed)))
+                        .alignment(Alignment::Left);
+                    frame.render_widget(
+                        meta,
+                        Rect {
+                            x: footer_area.x,
+                            y: footer_area.y,
+                            width: left_width,
+                            height: 1,
+                        },
+                    );
+                }
+                if right_width > 0 {
+                    let agent = Paragraph::new(agent_label)
+                        .style(agent_style)
+                        .alignment(Alignment::Right);
+                    frame.render_widget(
+                        agent,
+                        Rect {
+                            x: footer_area.x + left_width,
+                            y: footer_area.y,
+                            width: right_width,
+                            height: 1,
+                        },
+                    );
+                }
+            } else if show_agent {
+                let agent = Paragraph::new(agent_label)
+                    .style(agent_style)
+                    .alignment(Alignment::Right);
+                frame.render_widget(agent, footer_area);
+            } else if show_meta {
+                let truncated = truncate_to_width(meta_text, footer_area.width as usize);
+                let meta = Paragraph::new(truncated)
+                    .style(Style::default().fg(hex_to_color(&theme.color_dimmed)))
+                    .alignment(Alignment::Left);
+                frame.render_widget(meta, footer_area);
+            }
         }
     }
 
@@ -2434,6 +2729,11 @@ impl App {
         // Handle diff popup if open
         if self.state.diff_popup.is_some() {
             return self.handle_diff_popup_key(key);
+        }
+
+        // Handle log popup if open
+        if self.state.log_popup.is_some() {
+            return self.handle_log_popup_key(key);
         }
 
         // Handle PR confirmation popup if open
@@ -2644,6 +2944,7 @@ impl App {
                 let session_name = task.session_name.clone();
                 let worktree_path = task.worktree_path.clone();
                 let branch_name = task.branch_name.clone();
+                let log_scripts = task.log_scripts;
 
                 // Update task status immediately
                 task.session_name = None;
@@ -2668,6 +2969,7 @@ impl App {
                         &project_path,
                         tmux_ops.as_ref(),
                         git_ops.as_ref(),
+                        log_scripts,
                         true,
                     );
                 });
@@ -3108,6 +3410,45 @@ impl App {
         Ok(())
     }
 
+    fn handle_log_popup_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        if let Some(ref mut popup) = self.state.log_popup {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    self.state.log_popup = None;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let max_lines = popup.log_content.lines().count();
+                    if popup.scroll_offset + 1 < max_lines {
+                        popup.scroll_offset += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if popup.scroll_offset > 0 {
+                        popup.scroll_offset -= 1;
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::PageDown => {
+                    let page = 10;
+                    let max_lines = popup.log_content.lines().count();
+                    popup.scroll_offset = (popup.scroll_offset + page).min(max_lines.saturating_sub(1));
+                }
+                KeyCode::Char('u') | KeyCode::PageUp => {
+                    let page = 10;
+                    popup.scroll_offset = popup.scroll_offset.saturating_sub(page);
+                }
+                KeyCode::Char('g') => {
+                    popup.scroll_offset = 0;
+                }
+                KeyCode::Char('G') => {
+                    let max_lines = popup.log_content.lines().count();
+                    popup.scroll_offset = max_lines.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn handle_dashboard_key(&mut self, key: KeyCode) -> Result<()> {
         if self.state.show_project_list {
             match key {
@@ -3270,6 +3611,8 @@ impl App {
             KeyCode::Char('x') => self.delete_selected_task()?,
             KeyCode::Char('d') => self.show_task_diff()?,
             KeyCode::Char('s') => self.recreate_selected_task_session()?,
+            KeyCode::Char('b') => self.open_selected_task_app()?,
+            KeyCode::Char('L') => self.show_task_script_logs()?,
             KeyCode::Char('m') => self.move_task_right()?,
             KeyCode::Char('M') => self.move_backlog_to_running()?,
             KeyCode::Char('R') => {
@@ -4063,14 +4406,21 @@ impl App {
     fn perform_delete_task(&mut self, task_id: &str) -> Result<()> {
         if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
             if let Some(task) = db.get_task(task_id)? {
-                delete_task_resources(
+                let cleanup_ok = delete_task_resources(
                     &task,
                     self.state.config.cleanup_script.as_deref(),
                     project_path,
                     self.state.tmux_ops.as_ref(),
                     self.state.git_ops.as_ref(),
                     false,
-                )?;
+                )
+                .unwrap_or(false);
+                if !cleanup_ok {
+                    self.state.warning_message = Some((
+                        "cleanup_script failed — task removed anyway".to_string(),
+                        Instant::now(),
+                    ));
+                }
                 db.delete_task(&task.id)?;
                 self.refresh_tasks()?;
             }
@@ -4306,6 +4656,7 @@ impl App {
         let task_title = task.title.clone();
         let plugin_name = task.plugin.clone();
         let planning_agent_clone = planning_agent.clone();
+        let log_scripts = task.log_scripts;
         let auto_dismiss = plugin
             .as_ref()
             .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
@@ -4336,11 +4687,15 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
+        self.state
+            .phase_status_cache
+            .insert(task.id.clone(), (PhaseStatus::Working, Instant::now()));
 
         std::thread::spawn(move || {
             let mut tmp_task = Task::new(&task_title, &planning_agent_clone, &project_name);
             tmp_task.id = task_id.clone();
             tmp_task.plugin = plugin_name.clone();
+            tmp_task.log_scripts = log_scripts;
 
             let result = setup_task_worktree(
                 &mut tmp_task,
@@ -4563,6 +4918,7 @@ impl App {
         let session_name = task.session_name.clone();
         let worktree_path = task.worktree_path.clone();
         let branch_name = task.branch_name.clone();
+        let log_scripts = task.log_scripts;
         task.session_name = None;
         task.worktree_path = None;
 
@@ -4581,6 +4937,7 @@ impl App {
                 &project_path_clone,
                 tmux_ops.as_ref(),
                 git_ops.as_ref(),
+                log_scripts,
                 false,
             );
         });
@@ -4644,18 +5001,23 @@ impl App {
         let task_id = task.id.clone();
         let task_title = task.title.clone();
         let task_cycle = task.cycle;
+        let log_scripts = task.log_scripts;
         let auto_dismiss = plugin
             .as_ref()
             .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
+        self.state
+            .phase_status_cache
+            .insert(task.id.clone(), (PhaseStatus::Working, Instant::now()));
 
         std::thread::spawn(move || {
             // Create a temporary task to pass to setup_task_worktree
             let mut tmp_task = Task::new(&task_title, &agent_name, &project_name);
             tmp_task.id = task_id.clone();
             tmp_task.plugin = plugin_name.clone();
+            tmp_task.log_scripts = log_scripts;
 
             // setup_task_worktree creates the worktree and copies files (including preresearch artifacts if they exist at root)
             // We pass an empty prompt here — the actual prompt is resolved after worktree creation
@@ -4840,17 +5202,22 @@ impl App {
         let task_id = task.id.clone();
         let task_title = task.title.clone();
         let running_agent_clone = running_agent.clone();
+        let log_scripts = task.log_scripts;
         let auto_dismiss = plugin
             .as_ref()
             .map_or_else(Vec::new, |p| p.auto_dismiss.clone());
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
+        self.state
+            .phase_status_cache
+            .insert(task.id.clone(), (PhaseStatus::Working, Instant::now()));
 
         std::thread::spawn(move || {
             let mut tmp_task = Task::new(&task_title, &running_agent_clone, &project_name);
             tmp_task.id = task_id.clone();
             tmp_task.plugin = plugin_name.clone();
+            tmp_task.log_scripts = log_scripts;
 
             let result = setup_task_worktree(
                 &mut tmp_task,
@@ -5467,6 +5834,94 @@ impl App {
                 self.state.shell_popup = Some(popup);
             }
         }
+        Ok(())
+    }
+
+    fn open_selected_task_app(&mut self) -> Result<()> {
+        let Some(task) = self.state.board.selected_task() else {
+            return Ok(());
+        };
+        let Some(worktree_path) = task.worktree_path.as_deref() else {
+            self.state.warning_message = Some((
+                "task has no worktree to read .agtx/meta.json".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        };
+        let meta_path = task_meta_path(worktree_path);
+        let meta_contents = match std::fs::read_to_string(&meta_path) {
+            Ok(contents) => contents,
+            Err(_) => {
+                self.state.warning_message = Some((
+                    "no .agtx/meta.json found in worktree".to_string(),
+                    Instant::now(),
+                ));
+                return Ok(());
+            }
+        };
+        let Some(meta) = parse_task_meta(&meta_contents) else {
+            self.state.warning_message = Some((
+                "invalid .agtx/meta.json (missing port/url)".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        };
+        let url = meta
+            .url
+            .as_deref()
+            .map(normalize_url)
+            .or_else(|| meta.port.map(|port| format!("http://localhost:{}", port)));
+        let Some(url) = url else {
+            self.state.warning_message = Some((
+                "no app url/port found in .agtx/meta.json".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        };
+        if let Err(err) = open_url_in_browser(&url) {
+            self.state.warning_message = Some((
+                format!("failed to open app url: {}", err),
+                Instant::now(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn show_task_script_logs(&mut self) -> Result<()> {
+        let Some(task) = self.state.board.selected_task() else {
+            return Ok(());
+        };
+        let Some(worktree_path) = task.worktree_path.as_deref() else {
+            return Ok(());
+        };
+
+        let init_path = Path::new(worktree_path)
+            .join(".agtx")
+            .join("logs")
+            .join("init.log");
+        let cleanup_path = Path::new(worktree_path)
+            .join(".agtx")
+            .join("logs")
+            .join("cleanup.log");
+
+        let mut sections = Vec::new();
+        if let Ok(contents) = std::fs::read_to_string(&init_path) {
+            sections.push(format!("== init.log ==\n{}", contents.trim_end()));
+        }
+        if let Ok(contents) = std::fs::read_to_string(&cleanup_path) {
+            sections.push(format!("== cleanup.log ==\n{}", contents.trim_end()));
+        }
+
+        if sections.is_empty() {
+            return Ok(());
+        }
+
+        self.state.log_popup = Some(LogPopup {
+            task_title: task.title.clone(),
+            log_content: sections.join("\n\n"),
+            scroll_offset: 0,
+        });
+
         Ok(())
     }
 
@@ -6317,45 +6772,47 @@ fn run_cleanup_script_for_worktree(
     worktree_path: &Path,
     task_id: &str,
     branch_name: Option<&str>,
+    log_scripts: bool,
     force_cleanup: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let Some(script) = cleanup_script else {
-        return Ok(());
+        return Ok(true);
     };
     let script = script.trim();
     if script.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
 
     let envs = build_cleanup_env(project_path, worktree_path, task_id, branch_name);
-    let output = match git::run_cleanup_script(script, worktree_path, &envs) {
+    let cleanup_log_path = if log_scripts {
+        Some(worktree_path.join(".agtx").join("logs").join("cleanup.log"))
+    } else {
+        None
+    };
+    let output = match git::run_cleanup_script(
+        script,
+        worktree_path,
+        &envs,
+        cleanup_log_path.as_deref(),
+    ) {
         Ok(result) => result,
         Err(e) => {
             if force_cleanup {
-                eprintln!("cleanup_script failed to run (forced): {}", e);
-                return Ok(());
+                return Ok(false);
             }
             return Err(e);
         }
     };
 
-    if !output.stdout.trim().is_empty() {
-        eprintln!("cleanup_script stdout:\n{}", output.stdout.trim_end());
-    }
-    if !output.stderr.trim().is_empty() {
-        eprintln!("cleanup_script stderr:\n{}", output.stderr.trim_end());
-    }
-
     if !output.status.success() {
         let message = format!("cleanup_script exited with {}: {}", output.status, script);
         if force_cleanup {
-            eprintln!("{}", message);
-            return Ok(());
+            return Ok(false);
         }
         anyhow::bail!(message);
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Cleanup task resources (tmux window, cleanup script, git worktree) and mark as done
@@ -6395,18 +6852,25 @@ fn cleanup_task_for_done(
         let _ = tmux_ops.kill_window(session_name);
     }
     if let Some(worktree) = &task.worktree_path {
-        if let Err(e) = run_cleanup_script_for_worktree(
+        let _cleanup_ok = match run_cleanup_script_for_worktree(
             cleanup_script,
             project_path,
             Path::new(worktree),
             &task.id,
             task.branch_name.as_deref(),
+            task.log_scripts,
             force_cleanup,
         ) {
-            eprintln!("cleanup_script failed: {}", e);
-        } else {
-            let _ = git_ops.remove_worktree(project_path, worktree);
+            Ok(ok) => ok,
+            Err(e) => {
+                let _ = e;
+                false
+            }
+        };
+        if task.log_scripts && cleanup_script.is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
         }
+        let _ = git_ops.remove_worktree(project_path, worktree);
     }
     // Keep the branch so task can be reopened later
     task.session_name = None;
@@ -6426,6 +6890,7 @@ fn cleanup_task_resources(
     project_path: &Path,
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
+    log_scripts: bool,
     force_cleanup: bool,
 ) {
     // Archive artifacts before removing worktree
@@ -6454,16 +6919,23 @@ fn cleanup_task_resources(
         let _ = tmux_ops.kill_window(session_name);
     }
     if let Some(worktree) = worktree_path {
-        if let Err(e) = run_cleanup_script_for_worktree(
+        let _cleanup_ok = match run_cleanup_script_for_worktree(
             cleanup_script,
             project_path,
             Path::new(worktree),
             task_id,
             branch_name.as_deref(),
+            log_scripts,
             force_cleanup,
         ) {
-            eprintln!("cleanup_script failed: {}", e);
-            return;
+            Ok(ok) => ok,
+            Err(e) => {
+                let _ = e;
+                false
+            }
+        };
+        if log_scripts && cleanup_script.is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
         }
         let _ = git_ops.remove_worktree(project_path, worktree);
     }
@@ -6535,12 +7007,25 @@ fn setup_task_worktree(
             Some(parts.join(","))
         }
     };
+    let init_log_path = if task.log_scripts {
+        Some(
+            worktree_path
+                .join(".agtx")
+                .join("logs")
+                .join("init.log")
+                .to_string_lossy()
+                .to_string(),
+        )
+    } else {
+        None
+    };
     let init_warnings = git_ops.initialize_worktree(
         project_path,
         worktree_path,
         merged_copy_files,
         init_script,
         copy_dirs,
+        init_log_path,
     );
     // Warnings from copy_files are expected (e.g. files don't exist yet on first run)
     let _ = &init_warnings;
@@ -6650,7 +7135,7 @@ fn delete_task_resources(
     tmux_ops: &dyn TmuxOperations,
     git_ops: &dyn GitOperations,
     force_cleanup: bool,
-) -> Result<()> {
+) -> Result<bool> {
     // Kill tmux window if exists
     if let Some(ref session_name) = task.session_name {
         let _ = tmux_ops.kill_window(session_name);
@@ -6658,20 +7143,31 @@ fn delete_task_resources(
 
     // Remove worktree and delete branch if exists
     if let Some(ref worktree) = task.worktree_path {
+        let cleanup_ok = match run_cleanup_script_for_worktree(
+            cleanup_script,
+            project_path,
+            Path::new(worktree),
+            &task.id,
+            task.branch_name.as_deref(),
+            task.log_scripts,
+            force_cleanup,
+        ) {
+            Ok(ok) => ok,
+            Err(e) => {
+                let _ = e;
+                false
+            }
+        };
+        if task.log_scripts && cleanup_script.is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+        let _ = git_ops.remove_worktree(project_path, worktree);
         if let Some(ref branch_name) = task.branch_name {
-            run_cleanup_script_for_worktree(
-                cleanup_script,
-                project_path,
-                Path::new(worktree),
-                &task.id,
-                task.branch_name.as_deref(),
-                force_cleanup,
-            )?;
-            let _ = git_ops.remove_worktree(project_path, worktree);
             let _ = git_ops.delete_branch(project_path, branch_name);
         }
+        return Ok(cleanup_ok);
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Collect git diff content from a worktree

@@ -103,6 +103,8 @@ cp target/release/agtx ~/.local/bin/
 | `r` | Resume task (Review → Running) / Move back (Running → Planning) |
 | `p` | Next phase (Review → Planning, cyclic plugins only) |
 | `d` | Show git diff |
+| `b` | Open app in browser (uses `.agtx/meta.json`) |
+| `L` | Show init/cleanup logs for selected task |
 | `x` | Delete task |
 | `/` | Search tasks |
 | `P` | Select spec-driven workflow plugin |
@@ -189,6 +191,38 @@ continue after logging). The script receives:
 - `AGTX_TASK_ID`
 - `AGTX_TASK_SLUG`
 - `AGTX_TASK_BRANCH` (when available)
+
+### App Metadata (Optional)
+
+If your init script starts a dev server, write a small metadata file inside the worktree so the TUI
+can show the port on the task card and open the app in your browser.
+
+Create `.agtx/meta.json` in the worktree with either `port` or `url` (or both):
+
+```json
+{
+  "port": 5173,
+  "url": "http://localhost:5173"
+}
+```
+
+Example `init_script` snippet:
+
+```sh
+mkdir -p .agtx
+printf '{ "port": %s, "url": "http://localhost:%s" }\n' "$APP_PORT" "$APP_PORT" > .agtx/meta.json
+```
+
+Use `b` in the TUI to open the app URL for the selected task.
+
+### Script Logging (Per Task)
+
+Init/cleanup script logs are captured per task and written inside the worktree:
+
+- `.agtx/logs/init.log`
+- `.agtx/logs/cleanup.log`
+
+Press `L` to view these logs in-app.
 
 ### Per-Phase Agent Configuration
 

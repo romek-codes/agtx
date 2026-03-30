@@ -48,7 +48,8 @@ fn test_run_cleanup_script_captures_output_and_env() {
     let temp_dir = TempDir::new().unwrap();
     let envs = vec![("AGTX_TASK_ID".to_string(), "task-123".to_string())];
 
-    let output = git::run_cleanup_script("echo $AGTX_TASK_ID", temp_dir.path(), &envs).unwrap();
+    let output =
+        git::run_cleanup_script("echo $AGTX_TASK_ID", temp_dir.path(), &envs, None).unwrap();
 
     assert!(output.status.success());
     assert_eq!(output.stdout.trim(), "task-123");
@@ -58,7 +59,7 @@ fn test_run_cleanup_script_captures_output_and_env() {
 fn test_run_cleanup_script_nonzero_exit() {
     let temp_dir = TempDir::new().unwrap();
 
-    let output = git::run_cleanup_script("exit 42", temp_dir.path(), &[]).unwrap();
+    let output = git::run_cleanup_script("exit 42", temp_dir.path(), &[], None).unwrap();
 
     assert!(!output.status.success());
 }
@@ -330,7 +331,8 @@ fn test_initialize_worktree_no_config() {
     let temp_dir = setup_git_repo();
     let worktree_path = git::create_worktree(temp_dir.path(), "init-none").unwrap();
 
-    let warnings = git::initialize_worktree(temp_dir.path(), &worktree_path, None, None, &[]);
+    let warnings =
+        git::initialize_worktree(temp_dir.path(), &worktree_path, None, None, &[], None);
     assert!(warnings.is_empty());
 }
 
@@ -348,6 +350,7 @@ fn test_initialize_worktree_copy_files() {
         Some(".env, .env.local"),
         None,
         &[],
+        None,
     );
     assert!(warnings.is_empty());
     assert_eq!(
@@ -371,6 +374,7 @@ fn test_initialize_worktree_copy_missing_file() {
         Some(".nonexistent"),
         None,
         &[],
+        None,
     );
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains(".nonexistent"));
@@ -387,6 +391,7 @@ fn test_initialize_worktree_init_script_success() {
         None,
         Some("touch initialized.marker"),
         &[],
+        None,
     );
     assert!(warnings.is_empty());
     assert!(worktree_path.join("initialized.marker").exists());
@@ -397,8 +402,14 @@ fn test_initialize_worktree_init_script_failure() {
     let temp_dir = setup_git_repo();
     let worktree_path = git::create_worktree(temp_dir.path(), "init-script-fail").unwrap();
 
-    let warnings =
-        git::initialize_worktree(temp_dir.path(), &worktree_path, None, Some("exit 1"), &[]);
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        None,
+        Some("exit 1"),
+        &[],
+        None,
+    );
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("init_script"));
 }
@@ -416,6 +427,7 @@ fn test_initialize_worktree_copy_then_script() {
         Some(".env"),
         Some("cat .env > verified.txt"),
         &[],
+        None,
     );
     assert!(warnings.is_empty());
     assert_eq!(
@@ -439,6 +451,7 @@ fn test_initialize_worktree_copy_nested_path() {
         Some("web/.env.local"),
         None,
         &[],
+        None,
     );
     assert!(warnings.is_empty());
     assert_eq!(
@@ -452,8 +465,14 @@ fn test_initialize_worktree_empty_copy_files() {
     let temp_dir = setup_git_repo();
     let worktree_path = git::create_worktree(temp_dir.path(), "init-empty").unwrap();
 
-    let warnings =
-        git::initialize_worktree(temp_dir.path(), &worktree_path, Some(", , "), None, &[]);
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some(", , "),
+        None,
+        &[],
+        None,
+    );
     assert!(warnings.is_empty());
 }
 
@@ -466,8 +485,14 @@ fn test_initialize_worktree_copy_directory_supported() {
 
     let worktree_path = git::create_worktree(temp_dir.path(), "init-dir").unwrap();
 
-    let warnings =
-        git::initialize_worktree(temp_dir.path(), &worktree_path, Some("config"), None, &[]);
+    let warnings = git::initialize_worktree(
+        temp_dir.path(),
+        &worktree_path,
+        Some("config"),
+        None,
+        &[],
+        None,
+    );
     assert_eq!(warnings.len(), 0);
     // Directory and its contents should be copied
     assert!(worktree_path.join("config").join("app.toml").exists());

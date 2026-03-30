@@ -208,6 +208,7 @@ fn test_create_pr_with_content_success() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        log_scripts: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -303,6 +304,7 @@ fn test_create_pr_with_content_no_changes() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        log_scripts: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -357,6 +359,7 @@ fn test_create_pr_with_content_push_failure() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        log_scripts: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -417,6 +420,7 @@ fn test_push_changes_to_existing_pr_success() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        log_scripts: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -471,6 +475,7 @@ fn test_push_changes_to_existing_pr_no_changes() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        log_scripts: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -508,6 +513,7 @@ fn test_push_changes_to_existing_pr_no_url() {
         cycle: 1,
         referenced_tasks: None,
         escalation_note: None,
+        log_scripts: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };
@@ -1324,7 +1330,7 @@ fn test_word_boundary_roundtrip() {
 
 #[test]
 fn test_footer_text_sidebar_focused() {
-    let text = build_footer_text(InputMode::Normal, true, 0, false, false);
+    let text = build_footer_text(InputMode::Normal, true, 0, false, false, false, false);
     assert!(text.contains("[j/k] navigate"));
     assert!(text.contains("[e] hide sidebar"));
     assert!(!text.contains("[o] new"));
@@ -1332,7 +1338,7 @@ fn test_footer_text_sidebar_focused() {
 
 #[test]
 fn test_footer_text_backlog_column() {
-    let text = build_footer_text(InputMode::Normal, false, 0, false, false);
+    let text = build_footer_text(InputMode::Normal, false, 0, false, false, false, false);
     assert!(text.contains("[M] run"));
     assert!(text.contains("[m] plan"));
     assert!(!text.contains("[r] move left"));
@@ -1340,7 +1346,7 @@ fn test_footer_text_backlog_column() {
 
 #[test]
 fn test_footer_text_planning_column() {
-    let text = build_footer_text(InputMode::Normal, false, 1, false, false);
+    let text = build_footer_text(InputMode::Normal, false, 1, false, false, false, false);
     assert!(text.contains("[m] run"));
     assert!(!text.contains("[M] run"));
     assert!(!text.contains("[r] move left"));
@@ -1348,21 +1354,21 @@ fn test_footer_text_planning_column() {
 
 #[test]
 fn test_footer_text_running_column() {
-    let text = build_footer_text(InputMode::Normal, false, 2, false, false);
+    let text = build_footer_text(InputMode::Normal, false, 2, false, false, false, false);
     assert!(text.contains("[r] move left"));
     assert!(text.contains("[m] move"));
 }
 
 #[test]
 fn test_footer_text_review_column() {
-    let text = build_footer_text(InputMode::Normal, false, 3, false, false);
+    let text = build_footer_text(InputMode::Normal, false, 3, false, false, false, false);
     assert!(text.contains("[r] move left"));
     assert!(text.contains("[m] move"));
 }
 
 #[test]
 fn test_footer_text_review_column_cyclic() {
-    let text = build_footer_text(InputMode::Normal, false, 3, true, false);
+    let text = build_footer_text(InputMode::Normal, false, 3, true, false, false, false);
     assert!(text.contains("[p] next phase"));
     assert!(text.contains("[r] resume"));
     assert!(text.contains("[m] done"));
@@ -1370,7 +1376,7 @@ fn test_footer_text_review_column_cyclic() {
 
 #[test]
 fn test_footer_text_done_column() {
-    let text = build_footer_text(InputMode::Normal, false, 4, false, false);
+    let text = build_footer_text(InputMode::Normal, false, 4, false, false, false, false);
     assert!(!text.contains("[m] move"));
     assert!(!text.contains("[r]"));
     assert!(!text.contains("[d] diff"));
@@ -1378,14 +1384,14 @@ fn test_footer_text_done_column() {
 
 #[test]
 fn test_footer_text_input_title() {
-    let text = build_footer_text(InputMode::InputTitle, false, 0, false, false);
+    let text = build_footer_text(InputMode::InputTitle, false, 0, false, false, false, false);
     assert!(text.contains("Enter task title"));
     assert!(text.contains("[Esc] cancel"));
 }
 
 #[test]
 fn test_footer_text_input_description() {
-    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false);
+    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false, false, false);
     assert!(text.contains("[#] files"));
     assert!(text.contains("[/] skills"));
     assert!(text.contains("[!] tasks"));
@@ -1414,7 +1420,7 @@ fn test_setup_task_worktree_success() {
     // Expect worktree initialization
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _, _| vec![]);
+        .returning(|_, _, _, _, _, _| vec![]);
 
     // Expect agent command building
     mock_agent
@@ -1472,7 +1478,7 @@ fn test_setup_task_worktree_sets_task_fields() {
         .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _, _| vec![]);
+        .returning(|_, _, _, _, _, _| vec![]);
     mock_agent
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
@@ -1532,7 +1538,7 @@ fn test_setup_task_worktree_worktree_creation_fails() {
     // Should still initialize and create window with fallback path
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _, _| vec![]);
+        .returning(|_, _, _, _, _, _| vec![]);
     mock_agent
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
@@ -1585,7 +1591,7 @@ fn test_setup_task_worktree_tmux_window_fails() {
         .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _, _| vec![]);
+        .returning(|_, _, _, _, _, _| vec![]);
     mock_agent
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
@@ -1635,7 +1641,7 @@ fn test_setup_task_worktree_creates_session_when_missing() {
         .returning(|_, slug, _| Ok(format!("/project/.agtx/worktrees/{}", slug)));
     mock_git
         .expect_initialize_worktree()
-        .returning(|_, _, _, _, _| vec![]);
+        .returning(|_, _, _, _, _, _| vec![]);
     mock_agent
         .expect_build_interactive_command()
         .returning(|prompt| format!("claude '{}'", prompt));
@@ -1687,11 +1693,12 @@ fn test_setup_task_worktree_passes_init_config() {
     // Verify copy_files and init_script are passed through
     mock_git
         .expect_initialize_worktree()
-        .withf(|_, _, copy_files, init_script, _copy_dirs| {
+        .withf(|_, _, copy_files, init_script, _copy_dirs, init_log_path| {
             copy_files.as_deref() == Some("CLAUDE.md,.env")
                 && init_script.as_deref() == Some("./setup.sh")
+                && init_log_path.is_some()
         })
-        .returning(|_, _, _, _, _| vec!["warning: .env not found".to_string()]);
+        .returning(|_, _, _, _, _, _| vec!["warning: .env not found".to_string()]);
 
     mock_agent
         .expect_build_interactive_command()
@@ -2422,7 +2429,7 @@ fn test_install_plugin_none_clears_config() {
 
 #[test]
 fn test_footer_text_backlog_includes_research() {
-    let text = build_footer_text(InputMode::Normal, false, 0, false, false);
+    let text = build_footer_text(InputMode::Normal, false, 0, false, false, false, false);
     assert!(text.contains("[R] research"));
 }
 
@@ -3147,7 +3154,7 @@ fn test_determine_phase_variant_review_passthrough() {
 
 #[test]
 fn test_footer_text_review_non_cyclic_no_next_phase() {
-    let text = build_footer_text(InputMode::Normal, false, 3, false, false);
+    let text = build_footer_text(InputMode::Normal, false, 3, false, false, false, false);
     assert!(!text.contains("[p] next phase"));
     assert!(text.contains("[m] move"));
 }
@@ -4331,7 +4338,7 @@ fn test_task_ref_after_space() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_footer_text_select_plugin() {
-    let text = build_footer_text(InputMode::SelectPlugin, false, 0, false, false);
+    let text = build_footer_text(InputMode::SelectPlugin, false, 0, false, false, false, false);
     assert!(text.contains("select plugin"));
     assert!(text.contains("Tab"));
     assert!(text.contains("Enter"));
@@ -4341,7 +4348,7 @@ fn test_footer_text_select_plugin() {
 #[test]
 #[cfg(feature = "test-mocks")]
 fn test_footer_text_description_shows_all_triggers() {
-    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false);
+    let text = build_footer_text(InputMode::InputDescription, false, 0, false, false, false, false);
     assert!(
         text.contains("[#] files"),
         "Missing files trigger: {}",
@@ -7517,6 +7524,7 @@ fn test_cleanup_task_resources_kills_window_and_removes_worktree() {
         &mock_tmux,
         &mock_git,
         false,
+        false,
     );
 }
 
@@ -7535,6 +7543,7 @@ fn test_cleanup_task_resources_noop_when_no_session_or_worktree() {
         Path::new("/tmp/proj"),
         &mock_tmux,
         &mock_git,
+        false,
         false,
     );
     // No panic = correct (no mock calls made)

@@ -1,4 +1,7 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -107,6 +110,8 @@ fn run_worktree_script(
     script: &str,
     worktree_path: &Path,
     envs: &[(String, String)],
+    log_path: Option<&Path>,
+    label: &str,
 ) -> Result<ScriptOutput> {
     let output = Command::new("sh")
         .arg("-c")
@@ -116,11 +121,30 @@ fn run_worktree_script(
         .output()
         .with_context(|| format!("Failed to run script: {}", script))?;
 
-    Ok(ScriptOutput {
+    let result = ScriptOutput {
         status: output.status,
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
+    };
+
+    if let Some(path) = log_path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "== {} @ {} ==", label, Utc::now().to_rfc3339());
+            let _ = writeln!(file, "$ {}", script);
+            if !result.stdout.trim().is_empty() {
+                let _ = writeln!(file, "-- stdout --\n{}", result.stdout.trim_end());
+            }
+            if !result.stderr.trim().is_empty() {
+                let _ = writeln!(file, "-- stderr --\n{}", result.stderr.trim_end());
+            }
+            let _ = writeln!(file, "exit: {}\n", result.status);
+        }
+    }
+
+    Ok(result)
 }
 
 /// Run a cleanup script inside the worktree, returning the captured output.
@@ -128,8 +152,9 @@ pub fn run_cleanup_script(
     script: &str,
     worktree_path: &Path,
     envs: &[(String, String)],
+    log_path: Option<&Path>,
 ) -> Result<ScriptOutput> {
-    run_worktree_script(script, worktree_path, envs)
+    run_worktree_script(script, worktree_path, envs, log_path, "cleanup_script")
 }
 
 /// Initialize a worktree by copying agent config dirs, user-specified files, and running an init script.
@@ -142,6 +167,7 @@ pub fn initialize_worktree(
     copy_files: Option<&str>,
     init_script: Option<&str>,
     copy_dirs: &[String],
+    init_log_path: Option<&Path>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
 
@@ -214,7 +240,13 @@ pub fn initialize_worktree(
     if let Some(script) = init_script {
         let script = script.trim();
         if !script.is_empty() {
-            match run_worktree_script(script, worktree_path, &[]) {
+            match run_worktree_script(
+                script,
+                worktree_path,
+                &[],
+                init_log_path,
+                "init_script",
+            ) {
                 Ok(result) => {
                     if !result.status.success() {
                         warnings.push(format!(

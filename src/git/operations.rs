@@ -70,6 +70,7 @@ pub trait GitOperations: Send + Sync {
         copy_files: Option<String>,
         init_script: Option<String>,
         copy_dirs: Vec<String>,
+        init_log_path: Option<String>,
     ) -> Vec<String>;
 }
 
@@ -260,6 +261,7 @@ impl GitOperations for RealGitOps {
         copy_files: Option<String>,
         init_script: Option<String>,
         copy_dirs: Vec<String>,
+        init_log_path: Option<String>,
     ) -> Vec<String> {
         super::initialize_worktree(
             project_path,
@@ -267,6 +269,7 @@ impl GitOperations for RealGitOps {
             copy_files.as_deref(),
             init_script.as_deref(),
             &copy_dirs,
+            init_log_path.as_deref().map(Path::new),
         )
     }
 }
