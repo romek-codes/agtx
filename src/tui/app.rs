@@ -44,6 +44,7 @@ fn build_footer_text(
     selected_column: usize,
     has_cyclic_plugin: bool,
     show_recreate_session: bool,
+    show_kill_session: bool,
     show_open_app: bool,
     show_logs: bool,
 ) -> String {
@@ -63,6 +64,9 @@ fn build_footer_text(
                 };
                 if show_recreate_session {
                     text.push_str("  [s] recreate");
+                }
+                if show_kill_session {
+                    text.push_str("  [K] kill session");
                 }
                 if show_open_app {
                     text.push_str("  [b] app");
@@ -1353,9 +1357,30 @@ impl App {
                 if task.session_name.is_none() {
                     return None;
                 }
-                state.session_exists_cache.get(&task.id).map(|(exists, ts)| {
+                state.session_exists_cache.get(&task.id).and_then(|(exists, ts)| {
                     let stale = ts.elapsed() > std::time::Duration::from_secs(10);
-                    !stale && !*exists
+                    if stale {
+                        None
+                    } else {
+                        Some(!*exists)
+                    }
+                })
+            })
+            .unwrap_or(false);
+        let show_kill_session = state
+            .board
+            .selected_task()
+            .and_then(|task| {
+                if task.session_name.is_none() {
+                    return None;
+                }
+                state.session_exists_cache.get(&task.id).and_then(|(exists, ts)| {
+                    let stale = ts.elapsed() > std::time::Duration::from_secs(10);
+                    if stale {
+                        None
+                    } else {
+                        Some(*exists)
+                    }
                 })
             })
             .unwrap_or(false);
@@ -1380,6 +1405,7 @@ impl App {
                         state.board.selected_column,
                         has_cyclic_plugin,
                         show_recreate_session,
+                        show_kill_session,
                         show_open_app,
                         show_logs,
                     ),
@@ -1394,6 +1420,7 @@ impl App {
                     state.board.selected_column,
                     has_cyclic_plugin,
                     show_recreate_session,
+                    show_kill_session,
                     show_open_app,
                     show_logs,
                 ),
@@ -3611,6 +3638,7 @@ impl App {
             KeyCode::Char('x') => self.delete_selected_task()?,
             KeyCode::Char('d') => self.show_task_diff()?,
             KeyCode::Char('s') => self.recreate_selected_task_session()?,
+            KeyCode::Char('K') => self.kill_selected_task_session()?,
             KeyCode::Char('b') => self.open_selected_task_app()?,
             KeyCode::Char('L') => self.show_task_script_logs()?,
             KeyCode::Char('m') => self.move_task_right()?,
@@ -5981,6 +6009,37 @@ impl App {
         let agent_ops = self.state.agent_registry.get(&task.agent);
         let agent_cmd = agent_ops.build_interactive_command("");
 
+        let mut init_warning = None;
+        let init_log_path = if task.log_scripts {
+            Some(
+                Path::new(&worktree_path)
+                    .join(".agtx")
+                    .join("logs")
+                    .join("init.log"),
+            )
+        } else {
+            None
+        };
+        if let Some(script) = self.state.config.init_script.as_ref() {
+            let script = script.trim();
+            if !script.is_empty() {
+                match git::run_init_script(script, Path::new(&worktree_path), init_log_path.as_deref())
+                {
+                    Ok(output) => {
+                        if !output.status.success() {
+                            init_warning = Some(format!(
+                                "init_script exited with {}",
+                                output.status
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        init_warning = Some(format!("init_script failed: {}", err));
+                    }
+                }
+            }
+        }
+
         let use_restore_cmd = self
             .load_task_plugin(&task)
             .as_ref()
@@ -6058,10 +6117,54 @@ impl App {
             task.id.clone(),
             (true, Instant::now()),
         );
-        self.state.warning_message = Some((
-            "tmux session recreated — restoring context".to_string(),
-            Instant::now(),
-        ));
+        let message = match init_warning {
+            Some(warning) => format!("tmux session recreated — {}", warning),
+            None => "tmux session recreated — restoring context".to_string(),
+        };
+        self.state.warning_message = Some((message, Instant::now()));
+        Ok(())
+    }
+
+    fn kill_selected_task_session(&mut self) -> Result<()> {
+        let Some(task) = self.state.board.selected_task().cloned() else {
+            return Ok(());
+        };
+        let Some(session_name) = task.session_name.clone() else {
+            self.state.warning_message = Some((
+                "task has no tmux session to kill".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        };
+
+        if !self
+            .state
+            .tmux_ops
+            .window_exists(&session_name)
+            .unwrap_or(false)
+        {
+            self.state
+                .session_exists_cache
+                .insert(task.id.clone(), (false, Instant::now()));
+            self.state.warning_message = Some((
+                "tmux session not running".to_string(),
+                Instant::now(),
+            ));
+            return Ok(());
+        }
+
+        if let Err(err) = self.state.tmux_ops.kill_window(&session_name) {
+            self.state.warning_message = Some((
+                format!("failed to kill tmux session: {}", err),
+                Instant::now(),
+            ));
+            return Ok(());
+        }
+
+        self.state
+            .session_exists_cache
+            .insert(task.id.clone(), (false, Instant::now()));
+        self.state.warning_message = Some(("tmux session killed".to_string(), Instant::now()));
         Ok(())
     }
 
@@ -6867,9 +6970,6 @@ fn cleanup_task_for_done(
                 false
             }
         };
-        if task.log_scripts && cleanup_script.is_some() {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-        }
         let _ = git_ops.remove_worktree(project_path, worktree);
     }
     // Keep the branch so task can be reopened later
@@ -6934,9 +7034,6 @@ fn cleanup_task_resources(
                 false
             }
         };
-        if log_scripts && cleanup_script.is_some() {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-        }
         let _ = git_ops.remove_worktree(project_path, worktree);
     }
 }
@@ -7158,9 +7255,6 @@ fn delete_task_resources(
                 false
             }
         };
-        if task.log_scripts && cleanup_script.is_some() {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-        }
         let _ = git_ops.remove_worktree(project_path, worktree);
         if let Some(ref branch_name) = task.branch_name {
             let _ = git_ops.delete_branch(project_path, branch_name);

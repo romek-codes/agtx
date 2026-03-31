@@ -157,6 +157,15 @@ pub fn run_cleanup_script(
     run_worktree_script(script, worktree_path, envs, log_path, "cleanup_script")
 }
 
+/// Run an init script inside the worktree, returning the captured output.
+pub fn run_init_script(
+    script: &str,
+    worktree_path: &Path,
+    log_path: Option<&Path>,
+) -> Result<ScriptOutput> {
+    run_worktree_script(script, worktree_path, &[], log_path, "init_script")
+}
+
 /// Initialize a worktree by copying agent config dirs, user-specified files, and running an init script.
 ///
 /// Returns a Vec of warning messages for any issues encountered.
