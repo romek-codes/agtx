@@ -437,6 +437,10 @@ struct AppState {
     review_confirm_popup: Option<ReviewConfirmPopup>,
     // Channel for receiving background worktree setup results
     setup_rx: Option<mpsc::Receiver<SetupResult>>,
+    // Worktree setup progress info (used for popup + status)
+    setup_progress: Option<SetupProgressInfo>,
+    // Worktree setup progress popup
+    setup_progress_popup: Option<SetupProgressPopup>,
     // Phase detection
     phase_status_cache: HashMap<String, (PhaseStatus, Instant)>,
     spinner_frame: usize,
@@ -503,6 +507,22 @@ struct SetupResult {
     agent: String,
     plugin: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SetupProgressInfo {
+    task_id: String,
+    task_title: String,
+    worktree_path: PathBuf,
+    init_log_path: PathBuf,
+    log_enabled: bool,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct SetupProgressPopup {
+    info: SetupProgressInfo,
+    scroll_offset: usize,
 }
 
 /// Pre-fetched info about a referenced task for worktree setup (avoids DB access in thread).
@@ -783,6 +803,8 @@ impl App {
                 pr_status_popup: None,
                 pr_creation_rx: None,
                 setup_rx: None,
+                setup_progress: None,
+                setup_progress_popup: None,
                 done_confirm_popup: None,
                 move_confirm_popup: None,
                 skip_move_confirm: false,
@@ -960,6 +982,8 @@ impl App {
                 pr_status_popup: None,
                 pr_creation_rx: None,
                 setup_rx: None,
+                setup_progress: None,
+                setup_progress_popup: None,
                 done_confirm_popup: None,
                 move_confirm_popup: None,
                 skip_move_confirm: false,
@@ -1029,6 +1053,16 @@ impl App {
             if let Some(ref rx) = self.state.setup_rx {
                 if let Ok(result) = rx.try_recv() {
                     self.state.setup_rx = None;
+                    if self
+                        .state
+                        .setup_progress
+                        .as_ref()
+                        .map(|info| info.task_id == result.task_id)
+                        .unwrap_or(true)
+                    {
+                        self.state.setup_progress = None;
+                        self.state.setup_progress_popup = None;
+                    }
                     if let Some(err) = result.error {
                         self.state.phase_status_cache.remove(&result.task_id);
                         self.state.warning_message = Some((err, Instant::now()));
@@ -2333,6 +2367,55 @@ impl App {
             );
             frame.render_widget(footer, popup_chunks[2]);
         }
+
+        // Worktree setup progress popup
+        if let Some(ref popup) = state.setup_progress_popup {
+            let popup_area = centered_rect(80, 80, area);
+            frame.render_widget(Clear, popup_area);
+
+            let popup_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Title bar
+                    Constraint::Min(0),    // Log content
+                    Constraint::Length(1), // Footer
+                ])
+                .split(popup_area);
+
+            let title = format!(" Setup: {} ", popup.info.task_title);
+            let title_bar = Paragraph::new(title).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(hex_to_color(&state.config.theme.color_popup_header)),
+            );
+            frame.render_widget(title_bar, popup_chunks[0]);
+
+            let lines = Self::build_setup_progress_lines(state, &popup.info);
+            let total_lines = lines.len().max(1);
+            let visible_lines: Vec<Line> = lines
+                .into_iter()
+                .skip(popup.scroll_offset)
+                .take(popup_chunks[1].height.saturating_sub(2) as usize)
+                .collect();
+
+            let content =
+                Paragraph::new(visible_lines).block(Block::default().borders(Borders::ALL).border_style(
+                    Style::default().fg(hex_to_color(&state.config.theme.color_popup_border)),
+                ));
+            frame.render_widget(content, popup_chunks[1]);
+
+            let footer_text = format!(
+                " [j/k] scroll  [d/u] page  [g/G] top/bottom  [q/Esc] close  ({}/{}) ",
+                popup.scroll_offset + 1,
+                total_lines
+            );
+            let footer = Paragraph::new(footer_text).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(hex_to_color(&state.config.theme.color_dimmed)),
+            );
+            frame.render_widget(footer, popup_chunks[2]);
+        }
     }
 
     fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
@@ -2756,6 +2839,11 @@ impl App {
         // Handle diff popup if open
         if self.state.diff_popup.is_some() {
             return self.handle_diff_popup_key(key);
+        }
+
+        // Handle setup progress popup if open
+        if self.state.setup_progress_popup.is_some() {
+            return self.handle_setup_progress_popup_key(key);
         }
 
         // Handle log popup if open
@@ -3476,6 +3564,49 @@ impl App {
         Ok(())
     }
 
+    fn handle_setup_progress_popup_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        let max_lines = self
+            .state
+            .setup_progress_popup
+            .as_ref()
+            .map(|popup| Self::build_setup_progress_lines(&self.state, &popup.info).len())
+            .unwrap_or(0);
+
+        if let Some(ref mut popup) = self.state.setup_progress_popup {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    self.state.setup_progress_popup = None;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if popup.scroll_offset + 1 < max_lines {
+                        popup.scroll_offset += 1;
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if popup.scroll_offset > 0 {
+                        popup.scroll_offset -= 1;
+                    }
+                }
+                KeyCode::Char('d') | KeyCode::PageDown => {
+                    let page = 10;
+                    popup.scroll_offset = (popup.scroll_offset + page).min(max_lines.saturating_sub(1));
+                }
+                KeyCode::Char('u') | KeyCode::PageUp => {
+                    let page = 10;
+                    popup.scroll_offset = popup.scroll_offset.saturating_sub(page);
+                }
+                KeyCode::Char('g') => {
+                    popup.scroll_offset = 0;
+                }
+                KeyCode::Char('G') => {
+                    popup.scroll_offset = max_lines.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn handle_dashboard_key(&mut self, key: KeyCode) -> Result<()> {
         if self.state.show_project_list {
             match key {
@@ -3612,6 +3743,10 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.state.board.move_up(),
             KeyCode::Char('o') => {
                 // New task
+                if self.state.setup_rx.is_some() {
+                    self.open_setup_progress_popup();
+                    return Ok(());
+                }
                 self.state.input_mode = InputMode::InputTitle;
                 self.state.input_buffer.clear();
                 self.state.pending_task_title.clear();
@@ -3623,6 +3758,10 @@ impl App {
                         // Backlog task with active research session — open tmux popup
                         self.open_selected_task()?;
                     } else if task.status == TaskStatus::Backlog {
+                        if self.state.setup_rx.is_some() {
+                            self.open_setup_progress_popup();
+                            return Ok(());
+                        }
                         // Edit task
                         self.state.editing_task_id = Some(task.id.clone());
                         self.state.input_buffer = task.title.clone();
@@ -4715,6 +4854,7 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
+        self.set_setup_progress(&task.id, &task.title, &project_path, task.log_scripts);
         self.state
             .phase_status_cache
             .insert(task.id.clone(), (PhaseStatus::Working, Instant::now()));
@@ -5036,6 +5176,7 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
+        self.set_setup_progress(&task.id, &task.title, &project_path, task.log_scripts);
         self.state
             .phase_status_cache
             .insert(task.id.clone(), (PhaseStatus::Working, Instant::now()));
@@ -5237,6 +5378,7 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         self.state.setup_rx = Some(rx);
+        self.set_setup_progress(&task.id, &task.title, &project_path, task.log_scripts);
         self.state
             .phase_status_cache
             .insert(task.id.clone(), (PhaseStatus::Working, Instant::now()));
@@ -5951,6 +6093,117 @@ impl App {
         });
 
         Ok(())
+    }
+
+    fn set_setup_progress(&mut self, task_id: &str, task_title: &str, project_path: &Path, log_enabled: bool) {
+        let slug = generate_task_slug(task_id, task_title);
+        let worktree_path = project_path.join(".agtx").join("worktrees").join(&slug);
+        let init_log_path = worktree_path.join(".agtx").join("logs").join("init.log");
+        self.state.setup_progress = Some(SetupProgressInfo {
+            task_id: task_id.to_string(),
+            task_title: task_title.to_string(),
+            worktree_path,
+            init_log_path,
+            log_enabled,
+            started_at: Instant::now(),
+        });
+    }
+
+    fn open_setup_progress_popup(&mut self) {
+        if let Some(info) = self.state.setup_progress.clone() {
+            self.state.setup_progress_popup = Some(SetupProgressPopup {
+                info,
+                scroll_offset: 0,
+            });
+        } else {
+            self.state.warning_message = Some((
+                "worktree setup is already in progress".to_string(),
+                Instant::now(),
+            ));
+        }
+    }
+
+    fn build_setup_progress_lines(state: &AppState, info: &SetupProgressInfo) -> Vec<Line<'static>> {
+        const SPINNER_FRAMES: &[&str] = &[
+            "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+            "\u{2827}", "\u{2807}", "\u{280f}",
+        ];
+        let spinner = SPINNER_FRAMES[state.spinner_frame % SPINNER_FRAMES.len()];
+        let text_color = hex_to_color(&state.config.theme.color_text);
+        let dimmed_color = hex_to_color(&state.config.theme.color_dimmed);
+        let highlight_color = hex_to_color(&state.config.theme.color_accent);
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            format!("{} Worktree setup in progress", spinner),
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("Task: {}", info.task_title),
+            Style::default().fg(text_color),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("Path: {}", info.worktree_path.display()),
+            Style::default().fg(dimmed_color),
+        )));
+        lines.push(Line::from(""));
+
+        let worktree_exists = info.worktree_path.exists();
+        let worktree_status = if worktree_exists { "✓" } else { "…" };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", worktree_status), Style::default().fg(highlight_color)),
+            Span::styled(
+                "create worktree",
+                Style::default().fg(text_color),
+            ),
+        ]));
+
+        if info.log_enabled {
+            let log_exists = info.init_log_path.exists();
+            let init_status = if log_exists { "✓" } else { "…" };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", init_status), Style::default().fg(highlight_color)),
+                Span::styled(
+                    "run init script",
+                    Style::default().fg(text_color),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("– ", Style::default().fg(dimmed_color)),
+                Span::styled(
+                    "init script logging disabled",
+                    Style::default().fg(dimmed_color),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+
+        if info.log_enabled {
+            match std::fs::read_to_string(&info.init_log_path) {
+                Ok(contents) => {
+                    lines.push(Line::from(Span::styled(
+                        "== init.log ==",
+                        Style::default().fg(highlight_color),
+                    )));
+                    for line in contents.lines() {
+                        lines.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(text_color),
+                        )));
+                    }
+                }
+                Err(_) => {
+                    lines.push(Line::from(Span::styled(
+                        "init.log not available yet",
+                        Style::default().fg(dimmed_color),
+                    )));
+                }
+            }
+        }
+
+        lines
     }
 
     fn recreate_selected_task_session(&mut self) -> Result<()> {
