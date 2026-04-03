@@ -6940,6 +6940,15 @@ impl App {
         self.state.tmux_project_name = tmux::safe_session_name(&project.name);
         self.state.project_path = Some(project_path.clone());
 
+        // Reload config for the selected project
+        let project_config = ProjectConfig::load(&project_path).unwrap_or_default();
+        let global_config = GlobalConfig::load().unwrap_or_default();
+        self.state.config = MergedConfig::merge(&global_config, &project_config);
+        self.state.cached_plugin = Some(load_plugin_if_configured(
+            &self.state.config,
+            self.state.project_path.as_deref(),
+        ));
+
         // Open project database (create if needed)
         match Database::open_project(&project_path) {
             Ok(db) => self.state.db = Some(db),
