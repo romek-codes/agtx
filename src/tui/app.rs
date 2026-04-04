@@ -470,6 +470,11 @@ struct AppState {
     orchestrator_last_check: Instant,
     // Background session refresh channel (non-blocking phase status polling)
     session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
+    // Background task delete events
+    delete_rx: Option<mpsc::Receiver<DeleteEvent>>,
+    delete_tx: Option<mpsc::Sender<DeleteEvent>>,
+    // Tasks pending deletion (cleanup/grace/removal)
+    deleting_tasks: HashMap<String, DeleteState>,
 }
 
 /// State for confirming move to Done
@@ -664,6 +669,27 @@ struct DeleteConfirmPopup {
     task_title: String,
 }
 
+#[derive(Debug, Clone)]
+enum DeleteStage {
+    CleanupRunning,
+    GracePeriod { ends_at: Instant },
+    Removing,
+}
+
+#[derive(Debug, Clone)]
+struct DeleteState {
+    stage: DeleteStage,
+    project_path: PathBuf,
+    worktree_path: Option<String>,
+    branch_name: Option<String>,
+}
+
+#[derive(Debug)]
+enum DeleteEvent {
+    CleanupFinished { task_id: String, cleanup_ok: bool },
+    Removed { task_id: String },
+}
+
 /// State for asking if user wants to create PR when moving to Review
 #[derive(Debug, Clone)]
 struct ReviewConfirmPopup {
@@ -826,6 +852,9 @@ impl App {
                 orchestrator_stable_since: None,
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
+                delete_rx: None,
+                delete_tx: None,
+                deleting_tasks: HashMap::new(),
             },
         };
 
@@ -1005,6 +1034,9 @@ impl App {
                 orchestrator_stable_since: None,
                 orchestrator_last_check: Instant::now(),
                 session_refresh_rx: None,
+                delete_rx: None,
+                delete_tx: None,
+                deleting_tasks: HashMap::new(),
             },
         })
     }
@@ -1089,6 +1121,61 @@ impl App {
                         self.refresh_tasks()?;
                     }
                 }
+            }
+
+            // Check for task delete events
+            let delete_events = if let Some(ref rx) = self.state.delete_rx {
+                let mut events = Vec::new();
+                while let Ok(event) = rx.try_recv() {
+                    events.push(event);
+                }
+                events
+            } else {
+                Vec::new()
+            };
+            for event in delete_events {
+                match event {
+                    DeleteEvent::CleanupFinished { task_id, cleanup_ok } => {
+                        if !cleanup_ok {
+                            self.state.warning_message = Some((
+                                "cleanup_script failed — task removed anyway".to_string(),
+                                Instant::now(),
+                            ));
+                        }
+                        if let Some(state) = self.state.deleting_tasks.get_mut(&task_id) {
+                            state.stage = DeleteStage::GracePeriod {
+                                ends_at: Instant::now() + std::time::Duration::from_secs(10),
+                            };
+                        }
+                    }
+                    DeleteEvent::Removed { task_id } => {
+                        self.state.deleting_tasks.remove(&task_id);
+                        if let Some(db) = &self.state.db {
+                            let _ = db.delete_task(&task_id);
+                        }
+                        self.refresh_tasks()?;
+                    }
+                }
+            }
+
+            // Advance delete grace periods
+            let now = Instant::now();
+            let mut to_remove: Vec<(String, PathBuf, Option<String>, Option<String>)> = Vec::new();
+            for (task_id, state) in self.state.deleting_tasks.iter_mut() {
+                if let DeleteStage::GracePeriod { ends_at } = state.stage {
+                    if now >= ends_at {
+                        state.stage = DeleteStage::Removing;
+                        to_remove.push((
+                            task_id.clone(),
+                            state.project_path.clone(),
+                            state.worktree_path.clone(),
+                            state.branch_name.clone(),
+                        ));
+                    }
+                }
+            }
+            for (task_id, project_path, worktree_path, branch_name) in to_remove {
+                self.spawn_delete_removal(task_id, project_path, worktree_path, branch_name);
             }
 
             // Process MCP transition requests from the command queue
@@ -1337,6 +1424,7 @@ impl App {
                     is_selected,
                     &state.config.theme,
                     state.phase_status_cache.get(&task.id),
+                    state.deleting_tasks.contains_key(&task.id),
                     meta_label.as_deref(),
                     state.spinner_frame,
                 );
@@ -2446,6 +2534,7 @@ impl App {
         is_selected: bool,
         theme: &ThemeConfig,
         phase_status: Option<&(PhaseStatus, Instant)>,
+        is_deleting: bool,
         meta_label: Option<&str>,
         spinner_frame: usize,
     ) {
@@ -2519,6 +2608,11 @@ impl App {
                 }
                 None => Span::raw(""),
             };
+            let delete_span = if is_deleting {
+                Span::styled("\u{2717} ", Style::default().fg(Color::Red))
+            } else {
+                Span::raw("")
+            };
             // Escalation warning indicator
             let warn_span = if task.escalation_note.is_some() {
                 Span::styled(
@@ -2530,8 +2624,12 @@ impl App {
             } else {
                 Span::raw("")
             };
-            let title_spans =
-                Line::from(vec![indicator, warn_span, Span::styled(title, title_style)]);
+            let title_spans = Line::from(vec![
+                delete_span,
+                indicator,
+                warn_span,
+                Span::styled(title, title_style),
+            ]);
             let title_line = Paragraph::new(title_spans);
             let title_area = Rect {
                 x: inner.x,
@@ -2541,7 +2639,14 @@ impl App {
             };
             frame.render_widget(title_line, title_area);
         } else {
-            let title_line = Paragraph::new(title).style(title_style);
+            let title_line = if is_deleting {
+                Paragraph::new(Line::from(vec![
+                    Span::styled("\u{2717} ", Style::default().fg(Color::Red)),
+                    Span::styled(title, title_style),
+                ]))
+            } else {
+                Paragraph::new(title).style(title_style)
+            };
             let title_area = Rect {
                 x: inner.x,
                 y: inner.y,
@@ -4567,26 +4672,77 @@ impl App {
     }
 
     fn perform_delete_task(&mut self, task_id: &str) -> Result<()> {
-        if let (Some(db), Some(project_path)) = (&self.state.db, &self.state.project_path) {
-            if let Some(task) = db.get_task(task_id)? {
-                let cleanup_ok = delete_task_resources(
-                    &task,
-                    self.state.config.cleanup_script.as_deref(),
-                    project_path,
-                    self.state.tmux_ops.as_ref(),
-                    self.state.git_ops.as_ref(),
+        if self.state.deleting_tasks.contains_key(task_id) {
+            return Ok(());
+        }
+        let task = match self
+            .state
+            .db
+            .as_ref()
+            .and_then(|db| db.get_task(task_id).ok().flatten())
+        {
+            Some(task) => task,
+            None => return Ok(()),
+        };
+        let project_path = match self.state.project_path.clone() {
+            Some(path) => path,
+            None => return Ok(()),
+        };
+
+        let Some(worktree_path) = task.worktree_path.clone() else {
+            if let Some(db) = &self.state.db {
+                db.delete_task(&task.id)?;
+            }
+            self.refresh_tasks()?;
+            return Ok(());
+        };
+
+        let cleanup_script = self.state.config.cleanup_script.clone();
+        let has_cleanup = cleanup_script
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let tx = self.ensure_delete_channel();
+
+        self.state.deleting_tasks.insert(
+            task.id.clone(),
+            DeleteState {
+                stage: if has_cleanup {
+                    DeleteStage::CleanupRunning
+                } else {
+                    DeleteStage::Removing
+                },
+                project_path: project_path.clone(),
+                worktree_path: Some(worktree_path.clone()),
+                branch_name: task.branch_name.clone(),
+            },
+        );
+
+        if has_cleanup {
+            let task_id = task.id.clone();
+            let project_path = project_path.clone();
+            let branch_name = task.branch_name.clone();
+            let log_scripts = task.log_scripts;
+            std::thread::spawn(move || {
+                let cleanup_ok = run_cleanup_script_for_worktree(
+                    cleanup_script.as_deref(),
+                    &project_path,
+                    Path::new(&worktree_path),
+                    &task_id,
+                    branch_name.as_deref(),
+                    log_scripts,
                     false,
                 )
                 .unwrap_or(false);
-                if !cleanup_ok {
-                    self.state.warning_message = Some((
-                        "cleanup_script failed — task removed anyway".to_string(),
-                        Instant::now(),
-                    ));
-                }
-                db.delete_task(&task.id)?;
-                self.refresh_tasks()?;
-            }
+                let _ = tx.send(DeleteEvent::CleanupFinished { task_id, cleanup_ok });
+            });
+        } else {
+            self.spawn_delete_removal(
+                task.id.clone(),
+                project_path.clone(),
+                Some(worktree_path),
+                task.branch_name.clone(),
+            );
         }
         Ok(())
     }
@@ -6119,6 +6275,42 @@ impl App {
         }
     }
 
+    fn ensure_delete_channel(&mut self) -> mpsc::Sender<DeleteEvent> {
+        if self.state.delete_tx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.state.delete_tx = Some(tx.clone());
+            self.state.delete_rx = Some(rx);
+        }
+        self.state
+            .delete_tx
+            .as_ref()
+            .expect("delete_tx initialized")
+            .clone()
+    }
+
+    fn spawn_delete_removal(
+        &self,
+        task_id: String,
+        project_path: PathBuf,
+        worktree_path: Option<String>,
+        branch_name: Option<String>,
+    ) {
+        let Some(tx) = self.state.delete_tx.as_ref() else {
+            return;
+        };
+        let tx = tx.clone();
+        let git_ops = Arc::clone(&self.state.git_ops);
+        std::thread::spawn(move || {
+            if let Some(ref worktree) = worktree_path {
+                let _ = git_ops.remove_worktree(&project_path, worktree);
+            }
+            if let Some(ref branch) = branch_name {
+                let _ = git_ops.delete_branch(&project_path, branch);
+            }
+            let _ = tx.send(DeleteEvent::Removed { task_id });
+        });
+    }
+
     fn setup_in_progress_for(&self, task_id: &str) -> bool {
         self.state.setup_rx.is_some()
             && self
@@ -7346,6 +7538,18 @@ fn setup_task_worktree(
                 .to_string()
         }
     };
+    task.worktree_path = Some(worktree_path_str.clone());
+    task.branch_name = Some(format!("task/{}", unique_slug));
+
+    // Persist worktree info early so deletes during init can still clean up properly.
+    if let Ok(db) = Database::open_project(project_path) {
+        if let Ok(Some(mut db_task)) = db.get_task(&task.id) {
+            db_task.worktree_path = task.worktree_path.clone();
+            db_task.branch_name = task.branch_name.clone();
+            db_task.updated_at = chrono::Utc::now();
+            let _ = db.update_task(&db_task);
+        }
+    }
 
     // Initialize worktree: copy files and run init script
     // Merge plugin-level copy_files with project-level copy_files
@@ -7489,46 +7693,6 @@ fn setup_task_worktree(
     task.branch_name = Some(format!("task/{}", unique_slug));
 
     Ok(target)
-}
-
-/// Delete task resources: kill tmux window, run cleanup script, remove worktree, delete branch
-fn delete_task_resources(
-    task: &Task,
-    cleanup_script: Option<&str>,
-    project_path: &Path,
-    tmux_ops: &dyn TmuxOperations,
-    git_ops: &dyn GitOperations,
-    force_cleanup: bool,
-) -> Result<bool> {
-    // Kill tmux window if exists
-    if let Some(ref session_name) = task.session_name {
-        let _ = tmux_ops.kill_window(session_name);
-    }
-
-    // Remove worktree and delete branch if exists
-    if let Some(ref worktree) = task.worktree_path {
-        let cleanup_ok = match run_cleanup_script_for_worktree(
-            cleanup_script,
-            project_path,
-            Path::new(worktree),
-            &task.id,
-            task.branch_name.as_deref(),
-            task.log_scripts,
-            force_cleanup,
-        ) {
-            Ok(ok) => ok,
-            Err(e) => {
-                let _ = e;
-                false
-            }
-        };
-        let _ = git_ops.remove_worktree(project_path, worktree);
-        if let Some(ref branch_name) = task.branch_name {
-            let _ = git_ops.delete_branch(project_path, branch_name);
-        }
-        return Ok(cleanup_ok);
-    }
-    Ok(true)
 }
 
 /// Collect git diff content from a worktree

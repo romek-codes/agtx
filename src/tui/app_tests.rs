@@ -970,79 +970,6 @@ fn test_cleanup_task_for_done_no_resources() {
 }
 
 // =============================================================================
-// Tests for delete_task_resources
-// =============================================================================
-
-/// Test delete_task_resources cleans up all resources
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_delete_task_resources_full_cleanup() {
-    use crate::db::Task;
-
-    let mut mock_tmux = MockTmuxOperations::new();
-    let mut mock_git = MockGitOperations::new();
-
-    mock_tmux
-        .expect_kill_window()
-        .with(mockall::predicate::eq("project:task-window"))
-        .times(1)
-        .returning(|_| Ok(()));
-
-    mock_git
-        .expect_remove_worktree()
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    mock_git
-        .expect_delete_branch()
-        .with(
-            mockall::predicate::eq(Path::new("/project")),
-            mockall::predicate::eq("task/abc-feature"),
-        )
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    let mut task = Task::new("Feature task", "claude", "project-1");
-    task.session_name = Some("project:task-window".to_string());
-    task.worktree_path = Some("/tmp/worktree".to_string());
-    task.branch_name = Some("task/abc-feature".to_string());
-
-    delete_task_resources(
-        &task,
-        None,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-        false,
-    )
-    .unwrap();
-}
-
-/// Test delete_task_resources handles task without resources
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_delete_task_resources_no_resources() {
-    use crate::db::Task;
-
-    let mock_tmux = MockTmuxOperations::new();
-    let mock_git = MockGitOperations::new();
-    // No expectations - nothing should be called
-
-    let task = Task::new("Simple task", "claude", "project-1");
-    // No session_name, worktree_path, or branch_name
-
-    delete_task_resources(
-        &task,
-        None,
-        Path::new("/project"),
-        &mock_tmux,
-        &mock_git,
-        false,
-    )
-    .unwrap();
-}
-
-// =============================================================================
 // Tests for collect_task_diff
 // =============================================================================
 
@@ -3943,7 +3870,7 @@ fn test_board_navigation_with_tasks() {
 fn test_delete_task_confirm() {
     let mut app = make_test_app();
 
-    // Create a task
+    // Create a task without worktree - should delete immediately
     let db = app.state.db.as_ref().unwrap();
     db.create_task(&Task::new("Delete me", "claude", "test-project"))
         .unwrap();
@@ -3958,6 +3885,39 @@ fn test_delete_task_confirm() {
     press_key(&mut app, KeyCode::Char('y'));
     assert!(app.state.delete_confirm_popup.is_none());
     assert!(app.state.board.tasks.is_empty());
+}
+
+#[test]
+#[cfg(feature = "test-mocks")]
+fn test_delete_task_confirm_with_cleanup_stays_visible() {
+    let mut app = make_test_app();
+
+    // Create a task with a worktree so cleanup flow is used
+    let mut task = Task::new("Delete me later", "claude", "test-project");
+    let worktree_path = std::env::temp_dir().join("agtx-delete-test");
+    std::fs::create_dir_all(&worktree_path).unwrap();
+    task.worktree_path = Some(worktree_path.to_string_lossy().to_string());
+    task.branch_name = Some("task/delete-me".to_string());
+
+    let db = app.state.db.as_ref().unwrap();
+    db.create_task(&task).unwrap();
+    app.refresh_tasks().unwrap();
+    assert_eq!(app.state.board.tasks.len(), 1);
+
+    app.state.config.cleanup_script = Some("true".to_string());
+
+    // Press 'x' to delete — should show confirmation popup
+    press_key(&mut app, KeyCode::Char('x'));
+    assert!(app.state.delete_confirm_popup.is_some());
+
+    // Press 'y' to confirm
+    press_key(&mut app, KeyCode::Char('y'));
+    assert!(app.state.delete_confirm_popup.is_none());
+    assert_eq!(app.state.board.tasks.len(), 1);
+    assert!(app
+        .state
+        .deleting_tasks
+        .contains_key(&task.id));
 }
 
 #[test]
@@ -7277,7 +7237,7 @@ fn test_transform_skill_for_opencode_uses_description_from_frontmatter() {
 // =============================================================================
 // Tests for mock-dependent functions: is_pane_at_shell, is_agent_active,
 // collect_task_diff, cleanup_task_for_done, cleanup_task_resources,
-// delete_task_resources, save_task
+// save_task
 // =============================================================================
 
 // --- is_pane_at_shell ---
@@ -7553,62 +7513,6 @@ fn test_cleanup_task_resources_noop_when_no_session_or_worktree() {
         false,
     );
     // No panic = correct (no mock calls made)
-}
-
-// --- delete_task_resources ---
-
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_delete_task_resources_kills_window_removes_worktree_and_deletes_branch() {
-    let mut mock_tmux = MockTmuxOperations::new();
-    mock_tmux
-        .expect_kill_window()
-        .times(1)
-        .returning(|_| Ok(()));
-
-    let mut mock_git = MockGitOperations::new();
-    mock_git
-        .expect_remove_worktree()
-        .times(1)
-        .returning(|_, _| Ok(()));
-    mock_git
-        .expect_delete_branch()
-        .times(1)
-        .returning(|_, _| Ok(()));
-
-    let mut task = make_test_task("t1", "Delete me", TaskStatus::Planning);
-    task.session_name = Some("proj:task-win".to_string());
-    task.worktree_path = Some("/tmp/wt".to_string());
-    task.branch_name = Some("task/my-task".to_string());
-
-    delete_task_resources(
-        &task,
-        None,
-        Path::new("/tmp/proj"),
-        &mock_tmux,
-        &mock_git,
-        false,
-    )
-    .unwrap();
-}
-
-#[test]
-#[cfg(feature = "test-mocks")]
-fn test_delete_task_resources_noop_when_no_session_or_worktree() {
-    let mock_tmux = MockTmuxOperations::new();
-    let mock_git = MockGitOperations::new();
-
-    let task = make_test_task("t2", "Nothing to clean", TaskStatus::Backlog);
-    // session_name and worktree_path both None → no mock calls
-    delete_task_resources(
-        &task,
-        None,
-        Path::new("/tmp/proj"),
-        &mock_tmux,
-        &mock_git,
-        false,
-    )
-    .unwrap();
 }
 
 // --- save_task ---
