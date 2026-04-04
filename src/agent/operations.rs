@@ -31,8 +31,8 @@ pub trait AgentOperations: Send + Sync {
     /// Build the full shell command to run this agent as an orchestrator.
     /// Includes MCP registration (if supported by the agent) and cleanup on exit.
     /// Default implementation: no MCP, just launches the agent interactively.
-    fn build_orchestrator_command(&self, mcp_json: &str, agtx_bin: &str) -> String {
-        let _ = (mcp_json, agtx_bin);
+    fn build_orchestrator_command(&self, mcp_json: &str, mcp_command: &[String]) -> String {
+        let _ = (mcp_json, mcp_command);
         self.build_interactive_command("")
     }
 }
@@ -81,16 +81,58 @@ impl AgentOperations for CodingAgent {
         self.agent.build_interactive_command(prompt)
     }
 
-    fn build_orchestrator_command(&self, mcp_json: &str, _agtx_bin: &str) -> String {
+    fn build_orchestrator_command(&self, mcp_json: &str, mcp_command: &[String]) -> String {
         match self.agent.name.as_str() {
             "claude" => format!(
                 "claude mcp add-json agtx '{}' --scope local && {}; claude mcp remove agtx --scope local",
                 mcp_json,
                 self.build_interactive_command("")
             ),
+            "codex" => {
+                let mcp_cmd = mcp_command
+                    .iter()
+                    .map(|arg| shell_escape_arg(arg))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!(
+                    "codex mcp add agtx -- {} && {}; codex mcp remove agtx",
+                    mcp_cmd,
+                    self.build_interactive_command("")
+                )
+            }
             // To add a new orchestrator agent, add a match arm here.
             _ => self.build_interactive_command(""),
         }
+    }
+}
+
+fn shell_escape_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        "''".to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\"'\"'"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_orchestrator_command_codex_escapes_args() {
+        let agent = Agent::new("codex", "codex", "Codex CLI", "Codex <noreply@openai.com>");
+        let ops = CodingAgent::new(agent);
+        let mcp_command = vec![
+            "/path with space/agtx".to_string(),
+            "mcp-serve".to_string(),
+            "/tmp/project path".to_string(),
+        ];
+
+        let cmd = ops.build_orchestrator_command("ignored", &mcp_command);
+        assert_eq!(
+            cmd,
+            "codex mcp add agtx -- '/path with space/agtx' 'mcp-serve' '/tmp/project path' && codex --full-auto; codex mcp remove agtx"
+        );
     }
 }
 

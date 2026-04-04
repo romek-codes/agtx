@@ -6029,8 +6029,12 @@ impl App {
         }
 
         // Spawn new orchestrator
-        let default_agent = self.state.config.default_agent.clone();
-        let agent = self.state.agent_registry.get(&default_agent);
+        let orchestrator_agent = resolve_orchestrator_agent(
+            &self.state.config.orchestrator_agent,
+            &self.state.config.default_agent,
+            &self.state.available_agents,
+        );
+        let agent = self.state.agent_registry.get(&orchestrator_agent);
         let project_path_str = project_path.to_string_lossy().to_string();
 
         // Build MCP registration JSON for the agtx server
@@ -6045,7 +6049,12 @@ impl App {
         });
         let mcp_json_str = mcp_json.to_string().replace('\'', "'\\''");
 
-        let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &agtx_bin);
+        let mcp_command = vec![
+            agtx_bin.clone(),
+            "mcp-serve".to_string(),
+            project_path_str.clone(),
+        ];
+        let agent_cmd = agent.build_orchestrator_command(&mcp_json_str, &mcp_command);
 
         // Ensure project tmux session exists
         ensure_project_tmux_session(
@@ -6089,18 +6098,38 @@ impl App {
             &project_path,
             "agtx-orchestrate",
             skills::ORCHESTRATE_SKILL,
-            &default_agent,
+            &orchestrator_agent,
         );
 
         // Send the /agtx:orchestrate command once the agent is ready
-        let skill_cmd = skills::transform_plugin_command("/agtx:orchestrate", &default_agent)
-            .unwrap_or_else(|| "/agtx:orchestrate".to_string());
+        let mut skill_cmd =
+            skills::transform_plugin_command("/agtx:orchestrate", &orchestrator_agent)
+                .unwrap_or_else(|| "/agtx:orchestrate".to_string());
+        if orchestrator_agent == "codex" && !skill_cmd.ends_with([' ', '\n', '\t']) {
+            skill_cmd.push(' ');
+        }
         let tmux_ops = Arc::clone(&self.state.tmux_ops);
         let ready_flag = Arc::clone(&self.state.orchestrator_ready);
         let target = orch_target;
+        let is_codex = orchestrator_agent == "codex";
         std::thread::spawn(move || {
             if let Some(ready_target) = wait_for_agent_ready(&tmux_ops, &target) {
-                let _ = tmux_ops.send_keys(&ready_target, &skill_cmd);
+                if is_codex {
+                    let _ = tmux_ops.send_keys_literal(&ready_target, &skill_cmd);
+                    let check_str = skill_cmd.lines().next().unwrap_or(&skill_cmd);
+                    for _ in 0..20 {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        if let Ok(content) = tmux_ops.capture_pane(&ready_target) {
+                            if content.contains(check_str) {
+                                break;
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let _ = tmux_ops.send_keys_literal(&ready_target, "Enter");
+                } else {
+                    let _ = tmux_ops.send_keys(&ready_target, &skill_cmd);
+                }
                 ready_flag.store(true, Ordering::Release);
             }
         });
@@ -6739,8 +6768,31 @@ impl App {
         };
 
         let messages: Vec<String> = notifications.iter().map(|n| n.message.clone()).collect();
-        let combined = format!("[agtx] {}", messages.join(" | "));
-        let _ = self.state.tmux_ops.send_keys(&orch_target, &combined);
+        let mut combined = format!("[agtx] {}", messages.join(" | "));
+        let is_codex_orch = resolve_orchestrator_agent(
+            &self.state.config.orchestrator_agent,
+            &self.state.config.default_agent,
+            &self.state.available_agents,
+        ) == "codex";
+        if is_codex_orch && !combined.ends_with([' ', '\n', '\t']) {
+            combined.push(' ');
+        }
+        if is_codex_orch {
+            let _ = self.state.tmux_ops.send_keys_literal(&orch_target, &combined);
+            let check_str = combined.lines().next().unwrap_or(&combined);
+            for _ in 0..20 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if let Ok(content) = self.state.tmux_ops.capture_pane(&orch_target) {
+                    if content.contains(check_str) {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let _ = self.state.tmux_ops.send_keys_literal(&orch_target, "Enter");
+        } else {
+            let _ = self.state.tmux_ops.send_keys(&orch_target, &combined);
+        }
 
         // Reset idle tracking since we just sent input
         self.state.orchestrator_last_content.clear();
@@ -7243,6 +7295,18 @@ fn check_orchestrator_idle(
             }
             _ => OrchestratorIdleResult::Waiting,
         }
+    }
+}
+
+fn resolve_orchestrator_agent(
+    configured: &str,
+    default_agent: &str,
+    available: &[agent::Agent],
+) -> String {
+    if configured == default_agent || available.iter().any(|a| a.name == configured) {
+        configured.to_string()
+    } else {
+        default_agent.to_string()
     }
 }
 
@@ -8421,7 +8485,8 @@ fn send_skill_and_prompt(
             if !prompt.is_empty() {
                 Some(format!("{}\n\n{}", cmd, prompt))
             } else {
-                Some(cmd.clone())
+                // Trailing space helps ensure a visible input change before Enter.
+                Some(format!("{} ", cmd))
             }
         } else if !prompt.is_empty() {
             Some(prompt.to_string())
@@ -8440,6 +8505,11 @@ fn send_skill_and_prompt(
         };
 
         if let Some(text) = text_to_send {
+            let text = if text.ends_with([' ', '\n', '\t']) {
+                text
+            } else {
+                format!("{text} ")
+            };
             let _ = tmux_ops.send_keys_literal(target, &text);
             // Wait for text to appear in pane before sending Enter (Ink TUIs need time to render)
             let check_str = text.lines().next().unwrap_or(&text);

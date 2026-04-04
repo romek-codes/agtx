@@ -105,6 +105,7 @@ fn test_merged_config_project_overrides() {
     let global = GlobalConfig::default();
     let project = ProjectConfig {
         default_agent: Some("codex".to_string()),
+        orchestrator_agent: None,
         agents: None,
         base_branch: Some("develop".to_string()),
         github_url: Some("https://github.com/user/repo".to_string()),

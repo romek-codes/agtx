@@ -2736,6 +2736,18 @@ fn test_collect_phase_agents_mixed() {
     );
 }
 
+#[test]
+fn test_merged_config_orchestrator_falls_back_to_default() {
+    use crate::config::{GlobalConfig, MergedConfig, ProjectConfig};
+
+    let mut global = GlobalConfig::default();
+    global.default_agent = "codex".to_string();
+    global.orchestrator_agent = None;
+
+    let config = MergedConfig::merge(&global, &ProjectConfig::default());
+    assert_eq!(config.orchestrator_agent, "codex");
+}
+
 // === is_pane_at_shell tests ===
 
 #[test]

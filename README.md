@@ -231,6 +231,7 @@ By default, all phases use `default_agent`. You can override the agent for speci
 ```toml
 # ~/.config/agtx/config.toml
 default_agent = "claude"
+orchestrator_agent = "codex"
 
 [agents]
 research = "gemini"
@@ -239,8 +240,12 @@ running = "claude"
 review = "codex"
 ```
 
+`orchestrator_agent` controls which CLI runs the experimental orchestrator (Claude or Codex). If omitted, it falls back to `default_agent`.
+
 ```toml
 # .agtx/config.toml (project override — takes precedence over global)
+orchestrator_agent = "claude"
+
 [agents]
 running = "codex"
 ```
@@ -529,7 +534,7 @@ The orchestrator communicates with agtx through the [Model Context Protocol (MCP
 | `send_to_task` | Send a message to a task's agent pane (Planning/Running only) |
 
 **How it works:**
-1. When you press `O`, the TUI registers the MCP server with the orchestrator agent via `claude mcp add-json --scope local`
+1. When you press `O`, the TUI registers the MCP server with the orchestrator agent (Claude: `claude mcp add-json --scope local`, Codex: `codex mcp add agtx -- ...`)
 2. The orchestrator receives phase completion notifications pushed to its tmux pane when idle
 3. It reacts by calling `get_task` to check `allowed_actions`, then `move_task` to advance the task
 4. The TUI processes the transition request, executes all side effects (agent switching, skill deployment, prompt sending), and updates the database

@@ -9,6 +9,10 @@ pub struct GlobalConfig {
     #[serde(default = "default_agent")]
     pub default_agent: String,
 
+    /// Orchestrator agent for experimental mode
+    #[serde(default)]
+    pub orchestrator_agent: Option<String>,
+
     /// Per-phase agent overrides
     #[serde(default)]
     pub agents: PhaseAgentsConfig,
@@ -26,6 +30,7 @@ impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
             default_agent: default_agent(),
+            orchestrator_agent: Some(default_agent()),
             agents: PhaseAgentsConfig::default(),
             worktree: WorktreeConfig::default(),
             theme: ThemeConfig::default(),
@@ -188,6 +193,9 @@ pub struct ProjectConfig {
     /// Override default agent for this project
     pub default_agent: Option<String>,
 
+    /// Override orchestrator agent for this project
+    pub orchestrator_agent: Option<String>,
+
     /// Per-phase agent overrides for this project
     pub agents: Option<PhaseAgentsConfig>,
 
@@ -321,6 +329,7 @@ pub fn determine_first_run_action(
 #[derive(Debug, Clone)]
 pub struct MergedConfig {
     pub default_agent: String,
+    pub orchestrator_agent: String,
     pub phase_agents: PhaseAgentsConfig,
     pub worktree_enabled: bool,
     pub auto_cleanup: bool,
@@ -341,6 +350,11 @@ impl MergedConfig {
             default_agent: project
                 .default_agent
                 .clone()
+                .unwrap_or_else(|| global.default_agent.clone()),
+            orchestrator_agent: project
+                .orchestrator_agent
+                .clone()
+                .or_else(|| global.orchestrator_agent.clone())
                 .unwrap_or_else(|| global.default_agent.clone()),
             phase_agents: PhaseAgentsConfig {
                 research: project_agents.research.or(global.agents.research.clone()),

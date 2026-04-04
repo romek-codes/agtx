@@ -179,7 +179,7 @@ Structure:
 - Attach: `tmux -L agtx attach`
 
 ### Orchestrator Agent (Experimental)
-A dedicated Claude Code agent that autonomously manages the kanban board. Enabled with `--experimental`, toggled with `O`.
+A dedicated Claude Code or Codex agent that autonomously manages the kanban board. Enabled with `--experimental`, toggled with `O`.
 
 ```
 ┌─────────────┐     MCP (stdio)     ┌──────────────┐     SQLite     ┌─────┐
@@ -194,7 +194,7 @@ A dedicated Claude Code agent that autonomously manages the kanban board. Enable
 
 - **Orchestrator → TUI**: `transition_requests` DB table (commands like "move task X forward")
 - **TUI → Orchestrator**: `notifications` DB table, pushed via `send_keys` when orchestrator is idle
-- MCP registered per-session via `claude mcp add-json --scope local`, cleaned up on exit
+- MCP registered per-session via `claude mcp add-json --scope local` or `codex mcp add agtx -- ...`, cleaned up on exit
 - Orchestrator only manages Planning and Running phases; the user triages Backlog/Research manually and handles merging in Review/Done
 - Orchestrator is a coordinator, not a reviewer — it moves tasks forward immediately when phases complete, without inspecting output
 - Only "completed phase" notifications are sent (no "entered phase" notifications)

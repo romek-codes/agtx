@@ -75,9 +75,24 @@ async fn main() -> Result<()> {
         config::FirstRunAction::NewUserPrompt => {
             let available = agent::detect_available_agents();
             if !available.is_empty() {
-                let selected = prompt_agent_selection(&available)?;
+                let selected = prompt_agent_selection(&available, "Select your default coding agent")?;
                 let mut cfg = GlobalConfig::default();
                 cfg.default_agent = selected.name.clone();
+                let claude = available.iter().find(|a| a.name == "claude");
+                let codex = available.iter().find(|a| a.name == "codex");
+                cfg.orchestrator_agent = match (claude, codex) {
+                    (Some(claude), Some(codex)) => {
+                        let orchestrator_candidates = vec![claude.clone(), codex.clone()];
+                        let orchestrator = prompt_agent_selection(
+                            &orchestrator_candidates,
+                            "Select your orchestrator agent",
+                        )?;
+                        Some(orchestrator.name.clone())
+                    }
+                    (Some(claude), None) => Some(claude.name.clone()),
+                    (None, Some(codex)) => Some(codex.name.clone()),
+                    (None, None) => Some(cfg.default_agent.clone()),
+                };
                 cfg.save()?;
             }
         }
@@ -113,7 +128,10 @@ fn migrate_old_config(new_path: &std::path::Path) -> bool {
     false
 }
 
-fn prompt_agent_selection(agents: &[agent::Agent]) -> Result<&agent::Agent> {
+fn prompt_agent_selection<'a>(
+    agents: &'a [agent::Agent],
+    title: &str,
+) -> Result<&'a agent::Agent> {
     let mut stdout = io::stdout();
     let mut selected: usize = 0;
 
@@ -152,7 +170,7 @@ fn prompt_agent_selection(agents: &[agent::Agent]) -> Result<&agent::Agent> {
         stdout.execute(style::Print("\r\n"))?;
     }
     stdout.execute(style::Print("\r\n"))?;
-    stdout.execute(style::Print("  Select your default coding agent "))?;
+    stdout.execute(style::Print(format!("  {} ", title)))?;
     stdout.execute(style::PrintStyledContent(
         "(can be changed later via config)\r\n\r\n".dark_grey(),
     ))?;
