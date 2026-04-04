@@ -3743,10 +3743,6 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.state.board.move_up(),
             KeyCode::Char('o') => {
                 // New task
-                if self.state.setup_rx.is_some() {
-                    self.open_setup_progress_popup();
-                    return Ok(());
-                }
                 self.state.input_mode = InputMode::InputTitle;
                 self.state.input_buffer.clear();
                 self.state.pending_task_title.clear();
@@ -3758,7 +3754,7 @@ impl App {
                         // Backlog task with active research session — open tmux popup
                         self.open_selected_task()?;
                     } else if task.status == TaskStatus::Backlog {
-                        if self.state.setup_rx.is_some() {
+                        if self.setup_in_progress_for(&task.id) {
                             self.open_setup_progress_popup();
                             return Ok(());
                         }
@@ -6121,6 +6117,15 @@ impl App {
                 Instant::now(),
             ));
         }
+    }
+
+    fn setup_in_progress_for(&self, task_id: &str) -> bool {
+        self.state.setup_rx.is_some()
+            && self
+                .state
+                .setup_progress
+                .as_ref()
+                .is_some_and(|info| info.task_id == task_id)
     }
 
     fn build_setup_progress_lines(state: &AppState, info: &SetupProgressInfo) -> Vec<Line<'static>> {
